@@ -135,7 +135,8 @@ class Main:
             self.detections = [
                 {
                     "class_name": model.names[int(box.cls[0])],
-                    "bbox": list(map(int, box.xyxy[0]))
+                    "bbox": list(map(int, box.xyxy[0])),
+                    "confidence":float(box.conf[0])
                 }
                 for box in self.results[0].boxes
             ]
@@ -165,6 +166,7 @@ class Main:
 
             # Show the output frame
             cv2.imshow("Screen Capture Detection", frame)
+            cv2.waitKey(1)
 
     def append_time(self, time):
         
