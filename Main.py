@@ -103,7 +103,7 @@ class Main:
             time.sleep(3)
     
     def run_screen_capture_detection(self):
-        model = YOLO(r"C:\Users\kevin\Documents\GitHub\YOLO11-Final-Poop-2\runs\train\train_run\weights\best.pt")  # Replace with your trained YOLOv8 model
+        model = YOLO(r"C:\Users\kevin\Documents\GitHub\YOLO11-Final-Poop-2\runs\train\train_run\weights\best.pt").to("cuda")  # Replace with your trained YOLOv8 model
 
         # window_width, window_height = 2560, 1440
         # cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -126,7 +126,7 @@ class Main:
             # frame_resized = cv2.resize(frame, (window_width, window_height), interpolation=cv2.INTER_LINEAR)
             # Perform detection
             
-            self.results = model.predict(source=frame, conf=0.6,imgsz=1440)
+            self.results = model.predict(source=frame, conf=0.6,imgsz=1440,device = "cuda")
             # self.queue.put(results)
             
             # if not self.queue.empty():
@@ -157,14 +157,14 @@ class Main:
             runtime_ms = (end - start)/1000000
             self.append_time(runtime_ms)
             # Draw bounding boxes and labels
-            # for obj in self.detections:
-            #     x1, y1, x2, y2 = obj['bbox']
-            #     label = f"{obj['class_name']} {obj['confidence']:.2f}"
-            #     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
-            #     cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
+            for obj in self.detections:
+                x1, y1, x2, y2 = obj['bbox']
+                label = f"{obj['class_name']} {obj['confidence']:.2f}"
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
 
             # Show the output frame
-            # cv2.imshow("Screen Capture Detection", frame)
+            cv2.imshow("Screen Capture Detection", frame)
 
     def append_time(self, time):
         

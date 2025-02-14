@@ -1,0 +1,7 @@
+names:
+  0: Zombie
+  1: Berserker
+  2: Hunter
+  3: Head
+path: .
+train: train.txt
