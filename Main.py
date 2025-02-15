@@ -23,8 +23,8 @@ logging.getLogger('ultralytics').setLevel(logging.ERROR)
 class Main:
     
     def main(self):
-        self.screen_center_x = 2560 / 2  # Replace with your screen's width / 2
-        self.screen_center_y = 1440 / 2  # Replace with your screen's height / 2
+        self.screen_center_x = 2880 / 2  # Replace with your screen's width / 2
+        self.screen_center_y = 1800 / 2  # Replace with your screen's height / 2
         self.is_key_pressed = False
         # self.parser_process = None
         # self.queue = Queue()
@@ -103,11 +103,11 @@ class Main:
             time.sleep(3)
     
     def run_screen_capture_detection(self):
-        model = YOLO(r"C:\Users\kevin\Documents\GitHub\YOLO11-Final-Poop-2\runs\train\train_run\weights\best.pt").to("cuda")  # Replace with your trained YOLOv8 model
+        model = YOLO(r"C:\Users\kevin\OneDrive\Desktop\YOLO11-Final-Poop-2\runs\train\train_run\weights\best.pt") # Replace with your trained YOLOv8 model
 
-        # window_width, window_height = 2560, 1440
-        # cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
+        window_width, window_height = 1920, 1080
+        cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
         camera = dxcam.create(output_color='BGR')
         if camera is None:
             print("Camera initialization failed.")
@@ -120,13 +120,13 @@ class Main:
             frame = camera.grab()
 
             if frame is None or len(frame) == 0 or frame.shape[0] == 0 or frame.shape[1] == 0:
-                # print("Invalid frame captured")
+                print("Invalid frame captured")
                 continue
             # Scale the captured frame to fit 1920x1080 resolution while maintaining aspect ratio
             # frame_resized = cv2.resize(frame, (window_width, window_height), interpolation=cv2.INTER_LINEAR)
             # Perform detection
             
-            self.results = model.predict(source=frame, conf=0.6,imgsz=1440,device = "cuda")
+            self.results = model.predict(source=frame, conf=0.6,imgsz=480)
             # self.queue.put(results)
             
             # if not self.queue.empty():
