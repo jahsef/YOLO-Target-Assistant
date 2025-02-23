@@ -10,32 +10,27 @@ import win32api
 import win32con
 import math
 from multiprocessing import Process, Manager
+import os
 
 
-# from pynput.mouse import Controller
 
 # Suppress YOLO logs by adjusting the logging level
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
-
-# Load YOLOv8 model
 
 
 class Main:
     
     def main(self):
-        self.screen_center_x = 2880 / 2  # Replace with your screen's width / 2
-        self.screen_center_y = 1800 / 2  # Replace with your screen's height / 2
+        self.screen_center_x = 2560 / 2  # Replace with your screen's width / 2
+        self.screen_center_y = 1440 / 2  # Replace with your screen's height / 2
         self.is_key_pressed = False
-        # self.parser_process = None
-        # self.queue = Queue()
+
         self.frame_times = []
         self.time_interval_frames = 60
         self.manager = Manager()
         self.results = []
         self.detections = self.manager.list()
         
-        
-        # aimbot_thread = threading.Thread(target=self.aimbot)
         threading.Thread(target=self.input_detection, daemon=True).start()
         threading.Thread(target=self.calculate_fps, daemon=True).start()
 
@@ -50,10 +45,6 @@ class Main:
     def move_mouse_to_bounding_box(self, detection):
         center_bb_x = detection[0]
         center_bb_y = detection[1]
-        # def sigmoid_abs_scaled(input, beta=0.05, sensitivity = 1):
-        #     input = input * sensitivity
-        #     scaled_value = (abs(input) / (1 + math.exp(-beta * abs(input)))) * sensitivity
-        #     return int(scaled_value)
         delta_x = center_bb_x - self.screen_center_x
         delta_y = center_bb_y - self.screen_center_y
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
@@ -88,7 +79,6 @@ class Main:
             
         
         
-        
         # return largest_head_coords if largest_head_area > 0 else largest_body_coords#edgecase no detections handled in aimbot prolly 
     
     def input_detection(self):
@@ -100,10 +90,12 @@ class Main:
         keyboard.on_press(on_key_press)
 
         while True:  # Keep the thread running
-            time.sleep(3)
+            time.sleep(1)
     
     def run_screen_capture_detection(self):
-        model = YOLO(r"C:\Users\kevin\OneDrive\Desktop\YOLO11-Final-Poop-2\runs\train\train_run\weights\best.pt") # Replace with your trained YOLOv8 model
+        cwd = os.getcwd()
+        
+        model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.pt"))
 
         window_width, window_height = 1920, 1080
         cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -112,26 +104,26 @@ class Main:
         if camera is None:
             print("Camera initialization failed.")
             return
-        # parser_process = Process(target=self.parse_detections)
-        # parser_process.start()
+
         while True:
             
             start = time.time_ns()
             frame = camera.grab()
 
-            if frame is None or len(frame) == 0 or frame.shape[0] == 0 or frame.shape[1] == 0:
-                print("Invalid frame captured")
+            if frame is None or len(frame) == 0:
+                print("frame none")
+                time.sleep(.01)
+                continue
+            elif frame.shape[0] == 0 or frame.shape[1] == 0:
+                print('frame shape wrong')
+                time.sleep(.01)
                 continue
             # Scale the captured frame to fit 1920x1080 resolution while maintaining aspect ratio
             # frame_resized = cv2.resize(frame, (window_width, window_height), interpolation=cv2.INTER_LINEAR)
             # Perform detection
             
-            self.results = model.predict(source=frame, conf=0.6,imgsz=480)
-            # self.queue.put(results)
-            
-            # if not self.queue.empty():
-            #     self.detections = self.queue.get()
-            # Extract bounding boxes and group objects
+            self.results = model.predict(source=frame, conf=0.6,imgsz=1440)
+
             self.detections = [
                 {
                     "class_name": model.names[int(box.cls[0])],
@@ -143,16 +135,6 @@ class Main:
             if(self.is_key_pressed and self.detections):
                 self.aimbot()
 
-            # Update detections for the parser process
-            # with self.manager.Lock():  # Synchronize access
-            #     self.detections[:] = [
-            #         {
-            #             "class_name": self.model.names[int(box.cls[0])],
-            #             "bbox": list(map(int, box.xyxy[0])),
-            #             "confidence": float(box.conf[0])
-            #         }s
-            #         for box in self.results[0].boxes
-            # ]
                 
             end = time.time_ns()
             runtime_ms = (end - start)/1000000

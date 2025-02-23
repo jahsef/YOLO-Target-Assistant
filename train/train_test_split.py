@@ -10,7 +10,7 @@ pre_split_dir = os.path.join(base_dir, 'pre_split_dataset')
 split_dir = os.path.join(base_dir, 'split_dataset')
 
 images_dir = os.path.join(pre_split_dir, 'images/train')
-labels_dir = os.path.join(pre_split_dir, 'labels/traincm')
+labels_dir = os.path.join(pre_split_dir, 'labels/train')
 data_yaml_path = os.path.join(pre_split_dir, 'data.yaml')
 train_txt_path = os.path.join(pre_split_dir, 'train.txt')
 
@@ -33,9 +33,9 @@ def clear_directory(directory):
                 shutil.rmtree(file_path, ignore_errors=True)
         except Exception as e:
             print(f"Error deleting {file_path}: {e}")
-clear_directory(split_dir)
+
 # Create directories for split_dataset if they don't exist
-# print('cum')
+clear_directory(split_dir)
 os.makedirs(split_dir, exist_ok=True)
 os.makedirs(train_images_dir, exist_ok=True)
 os.makedirs(val_images_dir, exist_ok=True)

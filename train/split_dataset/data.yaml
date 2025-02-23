@@ -4,5 +4,5 @@ names:
   2: Hunter
   3: Head
 path: .
-train: C:\Users\kevin\OneDrive\Desktop\YOLO11-Enfartment-PoopPS\train\split_dataset\images/train
-val: C:\Users\kevin\OneDrive\Desktop\YOLO11-Enfartment-PoopPS\train\split_dataset\images/val
+train: C:\Users\kevin\Documents\GitHub\YOLO11-Enfartment-PoopPS\train\split_dataset\images/train
+val: C:\Users\kevin\Documents\GitHub\YOLO11-Enfartment-PoopPS\train\split_dataset\images/val
