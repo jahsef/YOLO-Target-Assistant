@@ -31,6 +31,7 @@ class Main:
         self.time_interval_frames = 60
         self.results = []
         self.detections = []
+        self.prev_target = None
         
         threading.Thread(target=self.input_detection, daemon=True).start()
         threading.Thread(target=self.calculate_fps, daemon=True).start()
@@ -50,37 +51,104 @@ class Main:
         delta_y = center_bb_y - self.screen_center_y
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
 
+    # def select_target_bounding_box(self) -> tuple[int,int]:
+    #     head_detection_dict = {}# center(tuple) : list[dist(int NEED TO CONVERT),area(int)]
+    #     zombie_detection_dict = {}
 
+    #     for detection in self.detections:
+    #         x1, y1, x2, y2 = detection['bbox']
+    #         curr_center_coords = ((x2 + x1) / 2, (y2 + y1) / 2)
+    #         curr_area = (x2-x1)*(y2-y1)
+    #         curr_dist = ((curr_center_coords[0] - self.screen_center_x) ** 2 + (curr_center_coords[1] - self.screen_center_y) ** 2) ** 0.5
+        
+    #         if curr_dist == 0:
+    #             score = float('inf')
+    #         else:
+    #             score = curr_area**1.5/curr_dist**.75
 
-    def select_target_bounding_box(self) -> tuple[int,int]:
-        head_detection_dict = {}# center(tuple) : list[dist(int NEED TO CONVERT),area(int)]
+    #         if detection['class_name'] == 'Head':
+    #             head_detection_dict[curr_center_coords] = score
+    #         else:
+    #             zombie_detection_dict[curr_center_coords] = score
+    #     if len(head_detection_dict) > 0: 
+    #         sorted_heads = sorted(head_detection_dict, key = head_detection_dict.__getitem__,reverse = True)
+    #         return [sorted_heads[0][0] + 560,sorted_heads[0][1]]
+    #     else:
+    #         sorted_zombies = sorted(zombie_detection_dict, key = zombie_detection_dict.__getitem__,reverse = True)
+    #         return [sorted_zombies[0][0] + 560,sorted_zombies[0][1]]
+        
+    # def select_target_bounding_box(self) -> tuple[int, int]:
+    #     head_detection_dict = {}
+    #     zombie_detection_dict = {}
+
+    #     for detection in self.detections:
+    #         x1, y1, x2, y2 = detection['bbox']
+    #         center_x = ((x2 + x1) / 2) + 560  # Apply x-axis offset
+    #         center_y = (y2 + y1) / 2
+    #         curr_center_coords = (center_x, center_y)
+
+    #         curr_area = (x2 - x1) * (y2 - y1)
+    #         curr_dist = ((curr_center_coords[0] - self.screen_center_x) ** 2 + (curr_center_coords[1] - self.screen_center_y) ** 2) ** 0.5 + 1e-6  # Prevent div by zero
+
+    #         score = curr_area **1.5/ curr_dist**.75  # More stable scoring function
+
+    #         if detection['class_name'] == 'Head':
+    #             head_detection_dict[curr_center_coords] = score
+    #         else:
+    #             zombie_detection_dict[curr_center_coords] = score
+
+    #     def get_best_target(detection_dict):
+    #         return max(detection_dict, key=detection_dict.get) if detection_dict else None
+
+    #     best_head = get_best_target(head_detection_dict)
+    #     best_zombie = get_best_target(zombie_detection_dict)
+
+    #     new_target = best_head if best_head else best_zombie
+
+    #     # Keep previous target unless new one is significantly better
+    #     if self.prev_target and new_target:
+    #         prev_score = head_detection_dict.get(self.prev_target, zombie_detection_dict.get(self.prev_target, 0))
+    #         new_score = head_detection_dict.get(new_target, zombie_detection_dict.get(new_target, 0))
+
+    #         if prev_score * 0.9 > new_score:  # Adds inertia
+    #             return self.prev_target
+
+    #     self.prev_target = new_target
+    #     return new_target if new_target else (self.screen_center_x, self.screen_center_y)  # Default if no detection
+    
+    def select_target_bounding_box(self) -> tuple[int, int]:
+        head_detection_dict = {}
         zombie_detection_dict = {}
 
         for detection in self.detections:
             x1, y1, x2, y2 = detection['bbox']
-            curr_center_coords = ((x2 + x1) / 2, (y2 + y1) / 2)
-            curr_area = (x2-x1)*(y2-y1)
-            curr_dist = ((x2-x1)**2 + (y2-y1)**2)**.5
-        
-            if curr_dist == 0:
-                score = float('inf')
-            else:
-                score = curr_area**1.5/curr_dist**.5
+            center_x = ((x2 + x1) / 2) + 560  # Apply x-axis offset
+            center_y = (y2 + y1) / 2
+            curr_center_coords = (center_x, center_y)
 
+            curr_area = (x2 - x1) * (y2 - y1)
+            curr_dist = curr_dist = ((curr_center_coords[0] - self.screen_center_x) ** 2 + (curr_center_coords[1] - self.screen_center_y) ** 2) ** 0.5 + 1e-6  # Prevent div by zero
+            # Calculate score with distance-based penalty (close targets get penalized more)
+            score = (curr_area**1.5 / curr_dist**.75)
             if detection['class_name'] == 'Head':
                 head_detection_dict[curr_center_coords] = score
             else:
                 zombie_detection_dict[curr_center_coords] = score
-        if len(head_detection_dict) > 0: 
-            sorted_heads = sorted(head_detection_dict, key = head_detection_dict.__getitem__,reverse = True)
-            return sorted_heads[0]
-        else:
-            sorted_zombies = sorted(zombie_detection_dict, key = zombie_detection_dict.__getitem__,reverse = True)
-            return sorted_zombies[0]
-            
-        
-        
-        # return largest_head_coords if largest_head_area > 0 else largest_body_coords#edgecase no detections handled in aimbot prolly 
+
+        def get_best_target(detection_dict):
+            return max(detection_dict.items(), key=lambda x: x[1], default=(None, 0))
+
+        best_head, head_score = get_best_target(head_detection_dict)
+        best_zombie, zombie_score = get_best_target(zombie_detection_dict)
+
+        # Prioritize heads, then zombies
+        new_target = best_head if best_head else best_zombie
+
+        # Keep previous target only for 1 frame
+        target = new_target if new_target else self.prev_target
+        self.prev_target = new_target  
+
+        return target if target else (self.screen_center_x, self.screen_center_y)  # Default if no detection
     
     def input_detection(self):
         def on_key_press(event):
@@ -90,54 +158,6 @@ class Main:
         keyboard.on_press(on_key_press)
         while True:
             time.sleep(2)
-        
-        # while True:
-        #     time.sleep(0.1)
-            # if self.is_key_pressed:
-            #     if keyboard.is_pressed('a'):
-            #         print('moving left')
-            #         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, 40, 0, 0, 0)
-                    
-            #     elif keyboard.is_pressed('d'):
-            #         print('moving right')
-            #         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, -40, 0, 0, 0)
-
-
-    def preprocess(self,frame: np.ndarray, target_size: tuple = (1440, 1440)) -> torch.Tensor:
-        """
-        Converts a BGR numpy frame to a GPU tensor in YOLO format (FP16, normalized, resized).
-        """
-        # 1. Resize with letterboxing (maintain aspect ratio)
-        h, w = frame.shape[:2]
-        scale = min(target_size[0] / h, target_size[1] / w)
-        new_h, new_w = int(h * scale), int(w * scale)
-        
-        # GPU-accelerated resize (using PyTorch)
-        frame_tensor = torch.as_tensor(frame, device="cuda", dtype=torch.float16)  # Zero-copy to GPU
-        frame_tensor = torch.permute(frame_tensor, (2, 0, 1))  # HWC → CHW (3, H, W)
-        
-        # Resize using bilinear interpolation (on GPU)
-        frame_resized = torch.nn.functional.interpolate(
-            frame_tensor.unsqueeze(0),  # Add batch dim
-            size=(new_h, new_w),
-            mode="bilinear",
-            align_corners=False
-        ).squeeze(0)
-        
-        # 2. Normalize (if your model expects [0,1] instead of [0,255])
-        frame_resized /= 255.0  # Normalize to [0,1]
-        
-        # 3. Pad to target_size (1440x1440) with 114s (YOLO convention)
-        pad_h = target_size[0] - new_h
-        pad_w = target_size[1] - new_w
-        frame_padded = torch.nn.functional.pad(
-            frame_resized,
-            (0, pad_w, 0, pad_h),  # (left, right, top, bottom)
-            value=114.0 / 255.0  # YOLO's "fill" value
-        )
-        
-        # 4. Add batch dimension and return
-        return frame_padded.unsqueeze(0)  # Shape: [1, 3, 1440, 1440]
 
     def run_screen_capture_detection(self):
         capture_region =[560,0,2000,1440]
