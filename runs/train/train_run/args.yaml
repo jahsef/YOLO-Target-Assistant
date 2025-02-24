@@ -5,7 +5,7 @@ data: C:\Users\kevin\Documents\GitHub\YOLO11-Enfartment-PoopPS\train//split_data
 epochs: 100
 time: null
 patience: 100
-batch: 5
+batch: 6
 imgsz: 1440
 save: true
 save_period: -1

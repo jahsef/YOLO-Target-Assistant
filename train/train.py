@@ -6,9 +6,9 @@ def main():
     # Define the paths to the dataset and YAML file
     cwd = os.getcwd()
     data_yaml_path = os.path.join(cwd,'train//split_dataset//data.yaml')  # Update with your data.yaml path
-    weights_path = os.path.join(cwd,'yolo12s.pt')  # You can use a pretrained model like yolov8n.pt
+    weights_path = os.path.join(cwd,'yolo11s.pt')  # You can use a pretrained model like yolov8n.pt
     epochs = 100  # Adjust the number of epochs as needed
-    batch = 5  # Adjust based on your GPU memory
+    batch = 6  # Adjust based on your GPU memory
     imgsz = 1440  # Image size for training
 
     # Load the YOLOv8 model (pretrained or custom)

@@ -10,8 +10,9 @@ import win32api
 import win32con
 import math
 from multiprocessing import Process, Manager
-import os
 
+import os
+import torch
 
 
 # Suppress YOLO logs by adjusting the logging level
@@ -19,17 +20,17 @@ logging.getLogger('ultralytics').setLevel(logging.ERROR)
 
 
 class Main:
-    
+     
     def main(self):
+        self.debug = False
         self.screen_center_x = 2560 / 2  # Replace with your screen's width / 2
         self.screen_center_y = 1440 / 2  # Replace with your screen's height / 2
         self.is_key_pressed = False
 
         self.frame_times = []
         self.time_interval_frames = 60
-        self.manager = Manager()
         self.results = []
-        self.detections = self.manager.list()
+        self.detections = []
         
         threading.Thread(target=self.input_detection, daemon=True).start()
         threading.Thread(target=self.calculate_fps, daemon=True).start()
@@ -64,7 +65,7 @@ class Main:
             if curr_dist == 0:
                 score = float('inf')
             else:
-                score = curr_area**3/curr_dist**4
+                score = curr_area**1.5/curr_dist**.5
 
             if detection['class_name'] == 'Head':
                 head_detection_dict[curr_center_coords] = score
@@ -86,69 +87,125 @@ class Main:
             if event.name == 'e':
                 self.is_key_pressed = not self.is_key_pressed
                 print(f"Key toggled: {self.is_key_pressed}")
-
         keyboard.on_press(on_key_press)
+        while True:
+            time.sleep(2)
+        
+        # while True:
+        #     time.sleep(0.1)
+            # if self.is_key_pressed:
+            #     if keyboard.is_pressed('a'):
+            #         print('moving left')
+            #         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, 40, 0, 0, 0)
+                    
+            #     elif keyboard.is_pressed('d'):
+            #         print('moving right')
+            #         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, -40, 0, 0, 0)
 
-        while True:  # Keep the thread running
-            time.sleep(1)
-    
+
+    def preprocess(self,frame: np.ndarray, target_size: tuple = (1440, 1440)) -> torch.Tensor:
+        """
+        Converts a BGR numpy frame to a GPU tensor in YOLO format (FP16, normalized, resized).
+        """
+        # 1. Resize with letterboxing (maintain aspect ratio)
+        h, w = frame.shape[:2]
+        scale = min(target_size[0] / h, target_size[1] / w)
+        new_h, new_w = int(h * scale), int(w * scale)
+        
+        # GPU-accelerated resize (using PyTorch)
+        frame_tensor = torch.as_tensor(frame, device="cuda", dtype=torch.float16)  # Zero-copy to GPU
+        frame_tensor = torch.permute(frame_tensor, (2, 0, 1))  # HWC → CHW (3, H, W)
+        
+        # Resize using bilinear interpolation (on GPU)
+        frame_resized = torch.nn.functional.interpolate(
+            frame_tensor.unsqueeze(0),  # Add batch dim
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False
+        ).squeeze(0)
+        
+        # 2. Normalize (if your model expects [0,1] instead of [0,255])
+        frame_resized /= 255.0  # Normalize to [0,1]
+        
+        # 3. Pad to target_size (1440x1440) with 114s (YOLO convention)
+        pad_h = target_size[0] - new_h
+        pad_w = target_size[1] - new_w
+        frame_padded = torch.nn.functional.pad(
+            frame_resized,
+            (0, pad_w, 0, pad_h),  # (left, right, top, bottom)
+            value=114.0 / 255.0  # YOLO's "fill" value
+        )
+        
+        # 4. Add batch dimension and return
+        return frame_padded.unsqueeze(0)  # Shape: [1, 3, 1440, 1440]
+
     def run_screen_capture_detection(self):
+        capture_region =[560,0,2000,1440]
+        #[560,0,2000,1440] center of screen
+        #[768, 180, 1792, 1260]
         cwd = os.getcwd()
         
-        model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.pt"))
+        model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.engine"))
 
-        window_width, window_height = 1920, 1080
-        cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
-        camera = dxcam.create(output_color='BGR')
+        if self.debug:
+            window_width, window_height = capture_region[2] - capture_region[0],capture_region[3]-capture_region[1]
+            cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
+        
+        camera = dxcam.create(region = capture_region, output_color='BGR',max_buffer_len=2)
+        # camera.start(target_fps = 120, video_mode= True)
         if camera is None:
             print("Camera initialization failed.")
             return
 
+        self.results = model.predict(source=np.zeros((2560,1440,3),dtype = np.uint8) ,conf=0.6, imgsz=1440)#preallocate the thingymabob?
         while True:
             
             start = time.time_ns()
             frame = camera.grab()
-
-            if frame is None or len(frame) == 0:
+            
+            if frame is None:
                 print("frame none")
                 time.sleep(.01)
                 continue
-            elif frame.shape[0] == 0 or frame.shape[1] == 0:
-                print('frame shape wrong')
-                time.sleep(.01)
-                continue
-            # Scale the captured frame to fit 1920x1080 resolution while maintaining aspect ratio
-            # frame_resized = cv2.resize(frame, (window_width, window_height), interpolation=cv2.INTER_LINEAR)
-            # Perform detection
-            
-            self.results = model.predict(source=frame, conf=0.6,imgsz=1440)
 
-            self.detections = [
-                {
+            self.results = model.predict(source=frame, conf=0.6, imgsz=(1440,1440)) 
+
+ 
+            self.detections.clear()#preallocated, uses same memory i think?
+            for box in self.results[0].boxes:
+                self.detections.append(
+                    {
                     "class_name": model.names[int(box.cls[0])],
                     "bbox": list(map(int, box.xyxy[0])),
                     "confidence":float(box.conf[0])
-                }
-                for box in self.results[0].boxes
-            ]
+                    }
+                )
+
             if(self.is_key_pressed and self.detections):
+
                 self.aimbot()
 
+
+            
+            
+
+            # Draw bounding boxes and labels
+            if self.debug:
+                for obj in self.detections:
+                    x1, y1, x2, y2 = obj['bbox']
+                    label = f"{obj['class_name']} {obj['confidence']:.2f}"
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
+
+                # Show the output frame
                 
+                cv2.imshow("Screen Capture Detection", frame)
+                cv2.waitKey(1)
             end = time.time_ns()
             runtime_ms = (end - start)/1000000
-            self.append_time(runtime_ms)
-            # Draw bounding boxes and labels
-            for obj in self.detections:
-                x1, y1, x2, y2 = obj['bbox']
-                label = f"{obj['class_name']} {obj['confidence']:.2f}"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
-                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
 
-            # Show the output frame
-            cv2.imshow("Screen Capture Detection", frame)
-            cv2.waitKey(1)
+            self.append_time(runtime_ms)
 
     def append_time(self, time):
         
