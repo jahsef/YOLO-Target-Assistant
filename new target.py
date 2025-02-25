@@ -29,7 +29,7 @@ class Main:
         self.time_interval_frames = 60
         self.results = []
         self.detections = []
-
+        self.target_selector = ts.TargetSelector(motion_prediction=False)
 
         
         threading.Thread(target=self.input_detection, daemon=True).start()
@@ -50,73 +50,8 @@ class Main:
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
 
     def select_target_bounding_box(self) -> tuple[int, int]:
-        # Precompute values for speed
-        screen_center_x = self.screen_center_x
-        screen_center_y = self.screen_center_y
-        x_offset = 560  #Adjust if this is dynamic
-
-        # Hysteresis configuration
-        HYSTERESIS_FACTOR = 1.1  # 10% score boost for previous target
-        PROXIMITY_THRESHOLD_SQ = 50**2  # 50px radius squared
-
-        head_targets = {}
-        zombie_targets = {}
-
-        # Get previous target's state
-        prev_center = getattr(self, 'prev_center', None)
-        prev_class = getattr(self, 'prev_class', None)
-
-        for detection in self.detections:
-            x1, y1, x2, y2 = detection['bbox']
-            width = x2 - x1
-            height = y2 - y1
-            area = width * height  # Area calculation
-
-            # Calculate center coordinates with offset
-            center_x = ((x1 + x2) / 2) + x_offset
-            center_y = (y1 + y2) / 2
-            curr_center = (center_x, center_y)
-
-            # Distance squared from screen center (avoids sqrt)
-            dx = center_x - screen_center_x
-            dy = center_y - screen_center_y
-            dist_sq = dx*dx + dy*dy + 1e-6  # Prevent division by zero
-
-            # Weighted score formula (adjust exponents here)
-            score = (area ** 2) / (dist_sq ** 0.75)  # Equivalent to original formula
-
-            # Apply hysteresis boost to previous target if detected again
-            if prev_center and detection['class_name'] == prev_class:
-                dx_prev = center_x - prev_center[0]
-                dy_prev = center_y - prev_center[1]
-                if dx_prev*dx_prev + dy_prev*dy_prev <= PROXIMITY_THRESHOLD_SQ:
-                    score *= HYSTERESIS_FACTOR
-
-            # Store in appropriate dictionary
-            if detection['class_name'] == 'Head':
-                head_targets[curr_center] = score
-            else:
-                zombie_targets[curr_center] = score
-
-        # Helper function to find best target
-        def get_best(detections):
-            return max(detections.items(), key=lambda x: x[1], default=(None, 0))
-
-        best_head, head_score = get_best(head_targets)
-        best_zombie, zombie_score = get_best(zombie_targets)
-
-        # Determine new target with class priority
-        new_target = best_head or best_zombie
-        new_class = 'Head' if best_head else 'Zombie' if best_zombie else None
-
-        # Update previous target tracking
-        self.prev_center = new_target if new_target else self.prev_center
-        self.prev_class = new_class if new_target else self.prev_class
-
-        # Fallback logic
-        if not new_target:
-            return self.prev_center or (screen_center_x, screen_center_y)
-        return new_target
+        screen_center = (self.screen_center_x, self.screen_center_y)
+        return self.target_selector.select_target(self.detections, screen_center)
 
     def input_detection(self):
         def on_key_press(event):

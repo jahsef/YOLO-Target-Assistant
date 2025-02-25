@@ -148,26 +148,34 @@ class Main:
         if camera is None:
             print("Camera initialization failed.")
             return
-
+        frame_num = 0
         while True:
-            
+            print(f'frame: {frame_num}')
             start = time.time_ns()
+            profiling_start = start
             frame = camera.grab()
             
             if frame is None:
                 print("frame none")
                 time.sleep(.01)
                 continue
+            print(f'frame grab time: { (time.time_ns()-profiling_start)/1e6:.2f}')
+            profiling_start = time.time_ns()
             # 2. Convert to tensor WITH PROPER FORMATTING
+            
             img_tensor = torch.from_numpy(frame).to(device)
             img_tensor = img_tensor.permute(2, 0, 1)        # HWC -> CHW
             img_tensor = img_tensor.unsqueeze(0)            # Add batch dim -> BCHW
             img_tensor = img_tensor.half() / 255.0          # Normalize AFTER casting
             img_tensor = img_tensor.contiguous()            # Critical for TensorRT
-            
+            print(f'tensor pre processing time: { (time.time_ns()-profiling_start)/1e6:.2f}')
             # with torch.no_grad():
-            self.results = model(source=img_tensor, conf=0.6, imgsz=(1440,1440),max_det = 16) 
-
+            
+            profiling_start = time.time_ns()
+            self.results = model(source=img_tensor, conf=0.6, imgsz=(1440,1440)) 
+            print(f'inference time: { (time.time_ns()-profiling_start)/1e6:.2f}')
+            
+            profiling_start = time.time_ns()
             for box in self.results[0].boxes:
                 detection = {
                     "class_name": model.names[int(box.cls[0])],
@@ -175,8 +183,11 @@ class Main:
                     "confidence": float(box.conf[0])
                 }
                 self.detections.append(detection)
-                
+            print(f'detection parsing time: { (time.time_ns()-profiling_start)/1e6:.2f}')
+            
+            
             if self.debug:
+                profiling_start = time.time_ns()
                 display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)#opencv does bgr while yolo needs rgb
                 for obj in self.detections:
                     x1, y1, x2, y2 = obj['bbox']
@@ -186,11 +197,13 @@ class Main:
                 
                 cv2.imshow("Screen Capture Detection", display_frame)
                 cv2.waitKey(1)
+                print(f'opencv render time: { (time.time_ns()-profiling_start)/1e6:.2f}')
                 
+            profiling_start = time.time_ns()
             if(self.is_key_pressed and self.detections):
                 self.aimbot()
-            # Trim unused entries
             self.detections.clear()
+            print(f'aimbot time: { (time.time_ns()-profiling_start)/1e6:.2f}')
             end = time.time_ns()
             runtime_ms = (end - start)/1000000
             self.append_time(runtime_ms)
