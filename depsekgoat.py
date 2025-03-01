@@ -53,12 +53,6 @@ class Threaded:
         self.detection_count = Array(c_int, 1, lock=False)
         self.detection_lock = Lock()
         self.new_detection_event = Event()
-        
-        self.buffer_index = Value('i', 0)  # Atomic index for double buffering
-        self.buffers = [
-            shared_memory.SharedMemory(create=True, size=int(np.prod(self.shape))),
-            shared_memory.SharedMemory(create=True, size=int(np.prod(self.shape)))
-        ]
 
     def main(self):
         processes = [
@@ -96,17 +90,10 @@ class Threaded:
             if frame is None: 
                 time.sleep(.001)
                 continue
-            
-            # Write to the inactive buffer
-            with self.buffer_index.get_lock():
-                write_index = 1 - self.buffer_index.value#1-1, 1-0, etc?
-            buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.buffers[write_index].buf)
-            np.copyto(buffer, frame)
-            
-            # Swap the active buffer
-            with self.buffer_index.get_lock():
-                self.buffer_index.value = write_index
+        
 
+            buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
+            np.copyto(buffer, frame)
             self.frame_ready.value = True
             self.frame_timestamp.value = time.perf_counter()
             
@@ -138,16 +125,16 @@ class Threaded:
             if not self.frame_ready.value or self.frame_timestamp.value <= last_processed_time:
                 time.sleep(0.0001)
                 continue
-            with self.buffer_index.get_lock():
-                read_index = self.buffer_index.value
-            frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.buffers[read_index].buf)
+            
 
+            frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
+            frame_copy = np.copy(frame_buffer)
             last_processed_time = self.frame_timestamp.value
             self.frame_ready.value = False
 
             with torch.cuda.stream(stream): 
                 tensor = (
-                    torch.as_tensor(frame_buffer,device = 'cuda')
+                    torch.as_tensor(frame_copy,device = 'cuda')
                     .permute(2, 0, 1)
                     .unsqueeze(0)
                     .div(255)
