@@ -21,17 +21,25 @@ logging.getLogger('ultralytics').setLevel(logging.ERROR)
 class Main:
      
     def main(self):     
-        self.debug = False
-        self.screen_center_x = 2560 / 2  # Replace with your screen's width / 2
-        self.screen_center_y = 1440 / 2  # Replace with your screen's height / 2
+        self.debug = True
+        self.screen_x = 2560
+        self.screen_y = 1440
+        self.capture_dim = (1440,1440)
+        
         self.is_key_pressed = False
         self.frame_times = []
         self.time_interval_frames = 60
         self.results = []
         self.detections = []
 
-
-        
+        self.screen_center_x = self.screen_x // 2
+        # print(self.screen_center_x)
+        self.screen_center_y = self.screen_y // 2
+        # print(self.screen_center_y)
+        self.x_offset = (self.screen_x - self.capture_dim[0])//2
+        # print(self.x_offset)
+        self.y_offset = (self.screen_y - self.capture_dim[1])//2
+        # print(self.y_offset)
         threading.Thread(target=self.input_detection, daemon=True).start()
         threading.Thread(target=self.calculate_fps, daemon=True).start()
 
@@ -50,10 +58,6 @@ class Main:
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
 
     def select_target_bounding_box(self) -> tuple[int, int]:
-        # Precompute values for speed
-        screen_center_x = self.screen_center_x
-        screen_center_y = self.screen_center_y
-        x_offset = 560  #Adjust if this is dynamic
 
         # Hysteresis configuration
         HYSTERESIS_FACTOR = 1.1  # 10% score boost for previous target
@@ -73,13 +77,13 @@ class Main:
             area = width * height  # Area calculation
 
             # Calculate center coordinates with offset
-            center_x = ((x1 + x2) / 2) + x_offset
-            center_y = (y1 + y2) / 2
+            center_x = ((x1 + x2) / 2) + self.x_offset
+            center_y = ((y1 + y2) / 2) + self.y_offset
             curr_center = (center_x, center_y)
 
             # Distance squared from screen center (avoids sqrt)
-            dx = center_x - screen_center_x
-            dy = center_y - screen_center_y
+            dx = center_x - self.screen_center_x
+            dy = center_y - self.screen_center_y
             dist_sq = dx*dx + dy*dy + 1e-6  # Prevent division by zero
 
             # Weighted score formula (adjust exponents here)
@@ -115,7 +119,7 @@ class Main:
 
         # Fallback logic
         if not new_target:
-            return self.prev_center or (screen_center_x, screen_center_y)
+            return self.prev_center or (self.screen_center_x, self.screen_center_y)
         return new_target
 
     def input_detection(self):
@@ -128,45 +132,48 @@ class Main:
             time.sleep(2)
 
     def run_screen_capture_detection(self):
-        capture_region =[560,0,2000,1440]
-        #[560,0,2000,1440] center of screen
-        #[768, 180, 1792, 1260]
-        
+        capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
+
         cwd = os.getcwd()
         
-        # model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.engine"))
+        # model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.pt"))
         model = YOLO(os.path.join(cwd, "runs/detect/tune4/weights/best.engine"))
-        device = torch.device("cuda")
+        # model = YOLO(os.path.join(cwd, "runs/train/1024x1024_batch12/weights/best.engine"))
+        
         
         if self.debug:
-            window_width, window_height = capture_region[2] - capture_region[0],capture_region[3]-capture_region[1]
+            window_width, window_height = self.capture_dim
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
         
-        camera = dxcam.create(region = capture_region, output_color='RGB',max_buffer_len=2)
-        # camera.start(target_fps = 160, video_mode= True)
+        camera = dxcam.create(region = capture_region, output_color='BGR',max_buffer_len=2)#yolo does bgr -> rgb conversion in model.predict automatically
+
         if camera is None:
             print("Camera initialization failed.")
             return
 
         while True:
-            
-            start = time.time_ns()
+            start = time.perf_counter_ns()
             frame = camera.grab()
             
             if frame is None:
                 print("frame none")
                 time.sleep(.01)
                 continue
-            # 2. Convert to tensor WITH PROPER FORMATTING
-            img_tensor = torch.from_numpy(frame).to(device)
-            img_tensor = img_tensor.permute(2, 0, 1)        # HWC -> CHW
-            img_tensor = img_tensor.unsqueeze(0)            # Add batch dim -> BCHW
-            img_tensor = img_tensor.half() / 255.0          # Normalize AFTER casting
-            img_tensor = img_tensor.contiguous()            # Critical for TensorRT
+
             
             # with torch.no_grad():
-            self.results = model(source=img_tensor, conf=0.6, imgsz=(1440,1440),max_det = 16) 
+            img_tensor = (
+                torch.from_numpy(frame)
+                .to(torch.device("cuda"))
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .half()
+                .div(255.0)
+                .contiguous()
+            )
+
+            self.results = model(source=img_tensor, conf=0.5, imgsz=self.capture_dim,max_det = 16) 
 
             for box in self.results[0].boxes:
                 detection = {
@@ -175,23 +182,23 @@ class Main:
                     "confidence": float(box.conf[0])
                 }
                 self.detections.append(detection)
-                
+            
             if self.debug:
-                display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)#opencv does bgr while yolo needs rgb
+                # display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 for obj in self.detections:
                     x1, y1, x2, y2 = obj['bbox']
                     label = f"{obj['class_name']} {obj['confidence']:.2f}"
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
-                    cv2.putText(display_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
                 
-                cv2.imshow("Screen Capture Detection", display_frame)
+                cv2.imshow("Screen Capture Detection", frame)
                 cv2.waitKey(1)
                 
             if(self.is_key_pressed and self.detections):
                 self.aimbot()
             # Trim unused entries
             self.detections.clear()
-            end = time.time_ns()
+            end = time.perf_counter_ns()
             runtime_ms = (end - start)/1000000
             self.append_time(runtime_ms)
 
