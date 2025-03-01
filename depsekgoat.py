@@ -25,12 +25,11 @@ class Detection(Structure):
 
 class Threaded:
     def __init__(self):
-
         self.fps_debug = True
-        self.cv_debug = True
+        self.cv_debug = False
         self.screen_x = 2560
         self.screen_y = 1440
-        self.capture_dim = (1440,1440)
+        self.capture_dim = (1024,1024)
         self.max_detections = 16
         self.screen_center_x = self.screen_x // 2
         self.screen_center_y = self.screen_y // 2
@@ -40,76 +39,69 @@ class Threaded:
         self.shape = list(self.capture_dim)
         self.shape.append(3)
         
-        self.screenshot_ready = Event()
-        self.inference_ready = Event()
-        self.inference_results_ready = Event()
-        self.inference_ready.set()  # Start with inference ready
-        
+        # Single shared memory buffer
+        self.latest_frame = shared_memory.SharedMemory(
+            create=True, 
+            size=int(np.prod(self.shape))  # 1440*1440*3 = 6,220,800 bytes
+        )
         self.frame_ready = Value(c_bool, False)
-        self.latest_frame = shared_memory.SharedMemory(create=True, size=np.prod(self.shape))
         self.frame_timestamp = Value(c_double, 0.0)
+        self.detection_timestamp = Value(c_double, 0.0)  # Added missing timestamp
 
-        
-        # Shared memory for frame
-        self.frame_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(self.shape)))
-        
-        # Shared memory for detections
-        
+        # Detection shared memory
         self.detections_shm = Array(Detection, self.max_detections, lock=False)
         self.detection_count = Array(c_int, 1, lock=False)
         self.detection_lock = Lock()
+        self.new_detection_event = Event()
 
     def main(self):
-
-
         processes = [
             Process(target=self.screen_cap, daemon=True),
             Process(target=self.inference, daemon=True),
             Process(target=self.aimbot_logic, daemon=True)
         ]
 
-        input_detection_thread = threading.Thread(target=self.input_detection, daemon=True)
-        input_detection_thread.start()
+        threading.Thread(target=self.input_detection, daemon=True).start()
 
         for p in processes:
             p.start()
 
         try:
-            while True:
-                time.sleep(1)
+            while True: time.sleep(1)
         except KeyboardInterrupt:
             print('Shutting down')
-            for p in processes:
-                p.terminate()
-            input_detection_thread.join()
-
-        self.frame_shm.close()
-        self.frame_shm.unlink()
+            for p in processes: p.terminate()
+            self.latest_frame.close()
+            self.latest_frame.unlink()
 
     def screen_cap(self):
-        capture_region = (0 + self.x_offset, 0 + self.y_offset, 
-                        self.screen_x - self.x_offset, self.screen_y - self.y_offset)
-        camera = dxcam.create(region=capture_region, output_color="BGR", max_buffer_len=2)
-        frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)
+        camera = dxcam.create(
+            region=(self.x_offset, self.y_offset, 
+                   self.screen_x - self.x_offset, self.screen_y - self.y_offset),
+            output_color="BGR",
+            max_buffer_len=2
+        )
         
         capture_frames = 0
         last_report = time.perf_counter()
 
         while True:
-            self.inference_ready.wait(.002)
             frame = camera.grab()
-            if frame is not None:
-                frame_buffer[:] = frame
-                self.screenshot_ready.set()
-                self.inference_ready.clear()
-                capture_frames += 1
-                
+            if frame is None: 
+                time.sleep(.001)
+                continue
+        
+
+            buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
+            np.copyto(buffer, frame)
+            self.frame_ready.value = True
+            self.frame_timestamp.value = time.perf_counter()
             
+            capture_frames += 1
             if time.perf_counter() - last_report >= 1.0:
                 print(f"Capture FPS: {capture_frames}")
                 capture_frames = 0
                 last_report = time.perf_counter()
-
     def process_results(self, results, class_names):
         count = len(results.boxes)
         self.detection_count[0] = count
@@ -123,74 +115,68 @@ class Threaded:
                     xyxy[0], xyxy[1], xyxy[2], xyxy[3],
                     float(box.conf[0]), int(box.cls[0])
                 )
-
     def inference(self):
-        frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)
-        model = YOLO(os.path.join(os.getcwd(), "runs/detect/tune4/weights/best.engine"))
+        # model = YOLO(os.path.join(os.getcwd(), "runs/detect/tune4/weights/best.engine"))
+        model = YOLO(os.path.join(os.getcwd(), "runs/train/1024x1024_batch12/weights/best.engine"))
         stream = torch.cuda.Stream()
-        
-        # Pass the event to aimbot logic process
-
+        last_processed_time = 0.0
 
         while True:
-            self.screenshot_ready.wait()
-
+            if not self.frame_ready.value or self.frame_timestamp.value <= last_processed_time:
+                time.sleep(0.0001)
+                continue
             
-            # Pure inference only
+
+            frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
+            frame_copy = np.copy(frame_buffer)
+            last_processed_time = self.frame_timestamp.value
+            self.frame_ready.value = False
+
             with torch.cuda.stream(stream): 
                 tensor = (
-                    torch.from_numpy(frame_buffer)
-                    .cuda()
+                    torch.as_tensor(frame_copy,device = 'cuda')
                     .permute(2, 0, 1)
                     .unsqueeze(0)
-                    .half()
                     .div(255)
                     .contiguous()
                 )
-                
-                results = model(tensor, imgsz=(1440,1440), conf=0.5, max_det=self.max_detections)
+                results = model(tensor, imgsz=self.capture_dim, conf=0.5, max_det=self.max_detections)
+            
             stream.synchronize()
+            
             self.process_results(results[0], model.names)
-            
-            # Signal new results available
-            self.inference_results_ready.set()
-            
-            self.inference_ready.set()
-            self.screenshot_ready.clear()
+            self.new_detection_event.set()
+            self.detection_timestamp.value = time.perf_counter()  # Update detection timestamp
 
     def aimbot_logic(self):
         last_fps_update = time.perf_counter()
+        last_detection_time = 0.0
         frame_count = 0
-        fps = 0
-        
-        if self.cv_debug:
-            cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("Screen Capture Detection", *self.capture_dim[:2])
 
+        
         while True:
-            # Wait for new results with timeout to prevent deadlock
-            self.inference_results_ready.wait()
+            self.new_detection_event.wait()
+            if self.cv_debug:
+                frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf).copy()
+            if self.cv_debug:
+                cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("Screen Capture Detection", *self.capture_dim[:2])
+
+
+
+                
+            with self.detection_timestamp.get_lock():
+                if self.detection_timestamp.value > last_detection_time:
+                    with self.detection_lock:
+                        count = self.detection_count[0]
+                        detections = [self.detections_shm[i] for i in range(count)]
+                    last_detection_time = self.detection_timestamp.value
+                    self.new_detection_event.clear()  # Reset flag
             
-            
-            if self.inference_results_ready.is_set():
-                frame_count += 1
-                 # Reset the flag
-                
-                # Get fresh frame copy
-                if self.cv_debug:
-                    frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf).copy()
-                
-                # Process detections
-                with self.detection_lock:
-                    count = self.detection_count[0]
-                    detections = [self.detections_shm[i] for i in range(count)]
-                self.inference_results_ready.clear() 
-                #aimbot here ig
-                
-                    
-                if self.is_key_pressed:
-                    aimbot()
+            if self.is_key_pressed and detections:
+                execute_aimbot()
             # Visualization
+            
             if self.cv_debug and 'frame' in locals():
 
                 for d in detections:
@@ -202,14 +188,15 @@ class Threaded:
                 cv2.imshow("Screen Capture Detection", frame)
                 cv2.waitKey(1)
 
-
+            frame_count+=1
+            
             current_time = time.perf_counter()
             if current_time - last_fps_update >= 1:
                 fps = frame_count / (current_time - last_fps_update)
                 last_fps_update = current_time
                 frame_count = 0
                 if self.fps_debug:
-                    print(f"FPS: {fps:.1f}")
+                    print(f"Actual FPS: {fps:.1f}")
 
 
     def input_detection(self):
