@@ -21,10 +21,10 @@ logging.getLogger('ultralytics').setLevel(logging.ERROR)
 class Main:
      
     def main(self):     
-        self.debug = True
+        self.debug = False
         self.screen_x = 2560
         self.screen_y = 1440
-        self.capture_dim = (1440,1440)
+        self.capture_dim = (1024,1024)
         
         self.is_key_pressed = False
         self.frame_times = []
@@ -58,69 +58,61 @@ class Main:
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
 
     def select_target_bounding_box(self) -> tuple[int, int]:
-
-        # Hysteresis configuration
-        HYSTERESIS_FACTOR = 1.1  # 10% score boost for previous target
-        PROXIMITY_THRESHOLD_SQ = 50**2  # 50px radius squared
-
-        head_targets = {}
-        zombie_targets = {}
-
-        # Get previous target's state
+        HYSTERESIS_FACTOR = 1.25
+        PROXIMITY_THRESHOLD_SQ = 50**2
+        screen_center = (self.screen_center_x, self.screen_center_y)
+        
+        # Track best candidates
+        best_head = (None, -1)
+        best_zombie = (None, -1)
         prev_center = getattr(self, 'prev_center', None)
         prev_class = getattr(self, 'prev_class', None)
 
         for detection in self.detections:
+            # Calculate bounding box properties
             x1, y1, x2, y2 = detection['bbox']
-            width = x2 - x1
-            height = y2 - y1
-            area = width * height  # Area calculation
+            width, height = x2 - x1, y2 - y1
+            area = width * height
+            
+            # Calculate center coordinates
+            center = ((x1 + x2)/2 + self.x_offset, 
+                    (y1 + y2)/2 + self.y_offset)
+            
+            # Calculate proximity score
+            dx = center[0] - screen_center[0]
+            dy = center[1] - screen_center[1]
+            dist_sq = dx*dx + dy*dy + 1e-6
+            score = (area ** 2) / (dist_sq ** 0.75)
 
-            # Calculate center coordinates with offset
-            center_x = ((x1 + x2) / 2) + self.x_offset
-            center_y = ((y1 + y2) / 2) + self.y_offset
-            curr_center = (center_x, center_y)
-
-            # Distance squared from screen center (avoids sqrt)
-            dx = center_x - self.screen_center_x
-            dy = center_y - self.screen_center_y
-            dist_sq = dx*dx + dy*dy + 1e-6  # Prevent division by zero
-
-            # Weighted score formula (adjust exponents here)
-            score = (area ** 2) / (dist_sq ** 0.75)  # Equivalent to original formula
-
-            # Apply hysteresis boost to previous target if detected again
-            if prev_center and detection['class_name'] == prev_class:
-                dx_prev = center_x - prev_center[0]
-                dy_prev = center_y - prev_center[1]
-                if dx_prev*dx_prev + dy_prev*dy_prev <= PROXIMITY_THRESHOLD_SQ:
+            # Apply hysteresis to previous target
+            if prev_class == detection['class_name'] and prev_center:
+                dx_prev = center[0] - prev_center[0]
+                dy_prev = center[1] - prev_center[1]
+                if (dx_prev*dx_prev + dy_prev*dy_prev) <= PROXIMITY_THRESHOLD_SQ:
                     score *= HYSTERESIS_FACTOR
 
-            # Store in appropriate dictionary
+            # Update best candidates
             if detection['class_name'] == 'Head':
-                head_targets[curr_center] = score
+                if score > best_head[1]:
+                    best_head = (center, score)
             else:
-                zombie_targets[curr_center] = score
+                if score > best_zombie[1]:
+                    best_zombie = (center, score)
 
-        # Helper function to find best target
-        def get_best(detections):
-            return max(detections.items(), key=lambda x: x[1], default=(None, 0))
-
-        best_head, head_score = get_best(head_targets)
-        best_zombie, zombie_score = get_best(zombie_targets)
-
-        # Determine new target with class priority
-        new_target = best_head or best_zombie
-        new_class = 'Head' if best_head else 'Zombie' if best_zombie else None
+        # Select target with class priority
+        new_target = None
+        if best_head[0]:
+            new_target = best_head[0]
+        elif best_zombie[0]:
+            new_target = best_zombie[0]
 
         # Update previous target tracking
-        self.prev_center = new_target if new_target else self.prev_center
-        self.prev_class = new_class if new_target else self.prev_class
-
-        # Fallback logic
-        if not new_target:
-            return self.prev_center or (self.screen_center_x, self.screen_center_y)
-        return new_target
+        if new_target:
+            self.prev_center = new_target
+            self.prev_class = 'Head' if best_head[0] else 'Zombie'
+        
+        # Fallback to previous target or screen center
+        return new_target or getattr(self, 'prev_center', None) or screen_center
 
     def input_detection(self):
         def on_key_press(event):
@@ -137,8 +129,8 @@ class Main:
         cwd = os.getcwd()
         
         # model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.pt"))
-        model = YOLO(os.path.join(cwd, "runs/detect/tune4/weights/best.engine"))
-        # model = YOLO(os.path.join(cwd, "runs/train/1024x1024_batch12/weights/best.engine"))
+        # model = YOLO(os.path.join(cwd, "runs/detect/tune4/weights/best.engine"))
+        model = YOLO(os.path.join(cwd, "runs/train/1024x1024_batch12/weights/best.engine"))
         
         
         if self.debug:
@@ -151,13 +143,14 @@ class Main:
         if camera is None:
             print("Camera initialization failed.")
             return
-
+        frame_count = 0
+        last_fps_update = time.perf_counter()
         while True:
-            start = time.perf_counter_ns()
+            
             frame = camera.grab()
             
             if frame is None:
-                print("frame none")
+                # print("frame none")
                 time.sleep(.01)
                 continue
 
@@ -173,7 +166,23 @@ class Main:
                 .contiguous()
             )
 
-            self.results = model(source=img_tensor, conf=0.5, imgsz=self.capture_dim,max_det = 16) 
+            self.results = list(model(source=img_tensor,
+                imgsz=self.capture_dim,
+                stream=True,
+                iou=0.5,
+                device=0,
+                half=True,
+                max_det=16,
+                agnostic_nms=False,
+                augment=False,
+                vid_stride=False,
+                visualize=False,
+                verbose=True,
+                show_boxes=False,
+                show_labels=False,
+                show_conf=False,
+                save=False,
+                show=False))
 
             for box in self.results[0].boxes:
                 detection = {
@@ -198,9 +207,13 @@ class Main:
                 self.aimbot()
             # Trim unused entries
             self.detections.clear()
-            end = time.perf_counter_ns()
-            runtime_ms = (end - start)/1000000
-            self.append_time(runtime_ms)
+            frame_count+=1
+            current_time = time.perf_counter()
+            if current_time - last_fps_update >= 1:
+                fps = frame_count / (current_time - last_fps_update)
+                last_fps_update = current_time
+                frame_count = 0
+                print(f'fps: {fps:.2f}')
 
     def append_time(self, time):
         

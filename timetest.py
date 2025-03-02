@@ -40,23 +40,40 @@ for _ in range(10):
 print('Starting FPS test')
 
 start = time.time()
+@torch.inference_mode()
+def fart():
+    for _ in range(1000):
 
-for _ in range(1000):
+        
+        img_tensor = (
+            torch.from_numpy(img)
+            .to(torch.device("cuda"))
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .half()
+            .div(255.0)
+            .contiguous()
+        )
 
-    
-    img_tensor = (
-        torch.from_numpy(img)
-        .to(torch.device("cuda"), copy = True)
-        .permute(2, 0, 1)
-        .unsqueeze(0)
-        .half()
-        .div(255.0)
-        .contiguous()
-    )
-
-    # with torch.no_grad():
-    results = model(source=img_tensor, imgsz=(1440,1440),conf = .6)
-
+        
+        results = model(source=img_tensor,
+            imgsz=(1440,1440),
+            stream=False,
+            iou=0.5,
+            device=0,
+            half=True,
+            max_det=16,
+            agnostic_nms=False,
+            augment=False,
+            vid_stride=False,
+            visualize=False,
+            verbose=True,
+            show_boxes=False,
+            show_labels=False,
+            show_conf=False,
+            save=False,
+            show=False)
+fart()
 inference_time = time.time() - start
 # print(f"Model: {model_name}")
 print(f"Inference time: {inference_time:.4f} sec")

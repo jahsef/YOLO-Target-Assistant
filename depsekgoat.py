@@ -10,6 +10,8 @@ import keyboard
 import time
 import numpy as np
 from ctypes import Structure, c_int, c_float, c_bool, c_double
+import win32api
+import win32con
 
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
 
@@ -27,6 +29,8 @@ class Threaded:
     def __init__(self):
         self.fps_debug = True
         self.cv_debug = False
+
+        
         self.screen_x = 2560
         self.screen_y = 1440
         self.capture_dim = (1024,1024)
@@ -35,10 +39,16 @@ class Threaded:
         self.screen_center_y = self.screen_y // 2
         self.x_offset = (self.screen_x - self.capture_dim[0])//2
         self.y_offset = (self.screen_y - self.capture_dim[1])//2
-        self.is_key_pressed = False
+        
+        self.is_key_pressed = Value(c_bool, False)
+        self.key_lock = Lock()
+        
         self.shape = list(self.capture_dim)
         self.shape.append(3)
         
+        self.prev_center = None
+        self.prev_class_id = None
+
         # Single shared memory buffer
         self.latest_frame = shared_memory.SharedMemory(
             create=True, 
@@ -60,6 +70,7 @@ class Threaded:
             Process(target=self.inference, daemon=True),
             Process(target=self.aimbot_logic, daemon=True)
         ]
+
 
         threading.Thread(target=self.input_detection, daemon=True).start()
 
@@ -92,8 +103,8 @@ class Threaded:
                 continue
         
 
-            buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
-            np.copyto(buffer, frame)
+            np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)[:] = frame#loading frame into the buffer
+
             self.frame_ready.value = True
             self.frame_timestamp.value = time.perf_counter()
             
@@ -115,7 +126,9 @@ class Threaded:
                     xyxy[0], xyxy[1], xyxy[2], xyxy[3],
                     float(box.conf[0]), int(box.cls[0])
                 )
+    @torch.inference_mode()
     def inference(self):
+        #below is 1440 engine
         # model = YOLO(os.path.join(os.getcwd(), "runs/detect/tune4/weights/best.engine"))
         model = YOLO(os.path.join(os.getcwd(), "runs/train/1024x1024_batch12/weights/best.engine"))
         stream = torch.cuda.Stream()
@@ -128,6 +141,7 @@ class Threaded:
             
 
             frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
+            #would accessing the buffer "directly" cause weird memory issues??
             frame_copy = np.copy(frame_buffer)
             last_processed_time = self.frame_timestamp.value
             self.frame_ready.value = False
@@ -140,7 +154,24 @@ class Threaded:
                     .div(255)
                     .contiguous()
                 )
-                results = model(tensor, imgsz=self.capture_dim, conf=0.5, max_det=self.max_detections)
+                results = list(model(source=tensor,
+                    imgsz=self.capture_dim,
+                    conf = .5,
+                    stream=True,
+                    iou=0.5,
+                    device=0,
+                    half=True,
+                    max_det=16,
+                    agnostic_nms=False,
+                    augment=False,
+                    vid_stride=False,
+                    visualize=False,
+                    verbose=True,
+                    show_boxes=False,
+                    show_labels=False,
+                    show_conf=False,
+                    save=False,
+                    show=False))
             
             stream.synchronize()
             
@@ -161,9 +192,6 @@ class Threaded:
             if self.cv_debug:
                 cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
                 cv2.resizeWindow("Screen Capture Detection", *self.capture_dim[:2])
-
-
-
                 
             with self.detection_timestamp.get_lock():
                 if self.detection_timestamp.value > last_detection_time:
@@ -172,38 +200,106 @@ class Threaded:
                         detections = [self.detections_shm[i] for i in range(count)]
                     last_detection_time = self.detection_timestamp.value
                     self.new_detection_event.clear()  # Reset flag
-            
-            if self.is_key_pressed and detections:
-                execute_aimbot()
-            # Visualization
-            
-            if self.cv_debug and 'frame' in locals():
+            with self.key_lock:
+                key_state = self.is_key_pressed.value
 
+            if key_state:
+                # print('2')
+                target_detection = self.select_target_bounding_box(detections)
+                self.move_mouse_to_bounding_box(target_detection)
+
+            if self.cv_debug and 'frame' in locals():
                 for d in detections:
+                    #detections are stored differently in this script than main
                     label = f"{d.class_id} {d.confidence:.2f}"
                     cv2.rectangle(frame, (d.x1, d.y1), (d.x2, d.y2), (0,255,0), 1)
                     cv2.putText(frame, label, (d.x1, d.y1-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 1)
-                
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 1)
                 cv2.imshow("Screen Capture Detection", frame)
                 cv2.waitKey(1)
-
             frame_count+=1
             
             current_time = time.perf_counter()
-            if current_time - last_fps_update >= 1:
+            if self.fps_debug and current_time - last_fps_update >= 1:
                 fps = frame_count / (current_time - last_fps_update)
                 last_fps_update = current_time
                 frame_count = 0
-                if self.fps_debug:
-                    print(f"Actual FPS: {fps:.1f}")
+                print(f"Actual FPS: {fps:.1f}")
+    
+    def select_target_bounding_box(self, detections) -> tuple[int, int]:
+        #detections are passed in because they are parsed into c struct
+        #i dont think instance var would be better maybe probably
+        HYSTERESIS_FACTOR = 1.15
+        PROXIMITY_THRESHOLD_SQ = 50**2
+        screen_center = (self.screen_center_x, self.screen_center_y)
+        
+        # Track best candidates
+        best_head = (None, -1)
+        best_zombie = (None, -1)
 
+        for d in detections:
+            # Calculate bounding box properties
+            #extract bounding box from struct
+            x1, y1, x2, y2 = d.x1, d.y1, d.x2, d.y2
+            width, height = x2 - x1, y2 - y1
+            area = width * height
+            
+            # Calculate center coordinates
+            center = ((x1 + x2)/2 + self.x_offset, 
+                    (y1 + y2)/2 + self.y_offset)
+            
+            # Calculate proximity score
+            dx = center[0] - screen_center[0]
+            dy = center[1] - screen_center[1]
+            dist_sq = dx*dx + dy*dy + 1e-6
+            score = (area ** 2) / (dist_sq ** 0.75)
 
+            # Apply hysteresis to previous target
+            if self.prev_class_id == d.class_id and self.prev_center:
+                dx_prev = center[0] - self.prev_center[0]
+                dy_prev = center[1] - self.prev_center[1]
+                if (dx_prev*dx_prev + dy_prev*dy_prev) <= PROXIMITY_THRESHOLD_SQ:
+                    score *= HYSTERESIS_FACTOR
+
+            # Update best candidates
+            if d.class_id == 3:#class_id 3 is head btw
+                if score > best_head[1]:
+                    best_head = (center, score)
+            else:
+                if score > best_zombie[1]:
+                    best_zombie = (center, score)
+
+        # Select target with class priority
+        new_target = None
+        if best_head[0]:
+            new_target = best_head[0]
+        elif best_zombie[0]:
+            new_target = best_zombie[0]
+
+        # Update previous target tracking
+        if new_target:
+            # self.prev_center = new_target
+            self.prev_class_id = 3 if best_head[0] else 0#if head exists return head class_id if not return zombie class_id
+        
+        # Fallback to previous target or screen center
+        
+        return new_target or screen_center #prev_center omitted dont want to aim on old data
+    def move_mouse_to_bounding_box(self, target_detection):
+        center_bb_x = target_detection[0]
+        center_bb_y = target_detection[1]
+        delta_x = center_bb_x - self.screen_center_x
+        delta_y = center_bb_y - self.screen_center_y
+        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
+        
     def input_detection(self):
-        keyboard.on_press(lambda e: 
-            setattr(self, 'is_key_pressed', not self.is_key_pressed) if e.name == 'e' else None)
+        def on_key_press(event):
+            if event.name == 'e':
+                with self.key_lock:
+                    self.is_key_pressed.value = not self.is_key_pressed.value
+                print(f"Key toggled: {self.is_key_pressed.value}")
+        keyboard.on_press(on_key_press)
         while True:
-            time.sleep(1)
+            time.sleep(2)
 
 if __name__ == '__main__':
     Threaded().main()
