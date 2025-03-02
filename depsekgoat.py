@@ -50,19 +50,26 @@ class Threaded:
         self.prev_class_id = None
 
         # Single shared memory buffer
-        self.latest_frame = shared_memory.SharedMemory(
+        self.frame_shm = shared_memory.SharedMemory(
             create=True, 
             size=int(np.prod(self.shape))  # 1440*1440*3 = 6,220,800 bytes
         )
-        self.frame_ready = Value(c_bool, False)
-        self.frame_timestamp = Value(c_double, 0.0)
-        self.detection_timestamp = Value(c_double, 0.0)  # Added missing timestamp
+        
+        self.frame_shm_lock = Lock()
+
 
         # Detection shared memory
         self.detections_shm = Array(Detection, self.max_detections, lock=False)
-        self.detection_count = Array(c_int, 1, lock=False)
         self.detection_lock = Lock()
-        self.new_detection_event = Event()
+        
+        self.is_sc_ready = Event()
+        self.is_inference_ready = Event()
+        self.is_inference_ready.set()
+
+        self.detection_count = Value(c_int,0)
+        self.detection_count_lock = Lock()
+
+        
 
     def main(self):
         processes = [
@@ -82,8 +89,8 @@ class Threaded:
         except KeyboardInterrupt:
             print('Shutting down')
             for p in processes: p.terminate()
-            self.latest_frame.close()
-            self.latest_frame.unlink()
+            self.frame_shm.close()
+            self.frame_shm.unlink()
 
     def screen_cap(self):
         camera = dxcam.create(
@@ -97,26 +104,30 @@ class Threaded:
         last_report = time.perf_counter()
 
         while True:
+            
+            self.is_inference_ready.wait(.001)
+            
             frame = camera.grab()
             if frame is None: 
-                time.sleep(.001)
+                time.sleep(.00005)
                 continue
         
+            with self.frame_shm_lock:
+                np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)[:] = frame#loading frame into the buffer
+                #seems like loading frame into buffer taking way too long?
 
-            np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)[:] = frame#loading frame into the buffer
-
-            self.frame_ready.value = True
-            self.frame_timestamp.value = time.perf_counter()
+            self.is_sc_ready.set()
+            self.is_inference_ready.clear()#assuming its not gonna be ready 
             
             capture_frames += 1
             if time.perf_counter() - last_report >= 1.0:
                 print(f"Capture FPS: {capture_frames}")
                 capture_frames = 0
                 last_report = time.perf_counter()
+                
     def process_results(self, results, class_names):
-        count = len(results.boxes)
-        self.detection_count[0] = count
-        
+        with self.detection_count_lock:
+            self.detection_count.value = len(results.boxes)
         with self.detection_lock:
             for i, box in enumerate(results.boxes):
                 if i >= self.max_detections:
@@ -131,29 +142,32 @@ class Threaded:
         #below is 1440 engine
         # model = YOLO(os.path.join(os.getcwd(), "runs/detect/tune4/weights/best.engine"))
         model = YOLO(os.path.join(os.getcwd(), "runs/train/1024x1024_batch12/weights/best.engine"))
+
+
         stream = torch.cuda.Stream()
-        last_processed_time = 0.0
-
         while True:
-            if not self.frame_ready.value or self.frame_timestamp.value <= last_processed_time:
-                time.sleep(0.0001)
-                continue
             
+            self.is_sc_ready.wait()
 
-            frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf)
+            
+            with self.frame_shm_lock:
+                frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)
+            
             #would accessing the buffer "directly" cause weird memory issues??
-            frame_copy = np.copy(frame_buffer)
-            last_processed_time = self.frame_timestamp.value
-            self.frame_ready.value = False
-
-            with torch.cuda.stream(stream): 
+            # frame_copy = np.copy(frame_buffer)
+            
+            #if clear flag early then the aimbot will have older data but higher fps
+            self.is_sc_ready.clear()
+            with torch.cuda.stream(stream):
                 tensor = (
-                    torch.as_tensor(frame_copy,device = 'cuda')
+                    torch.as_tensor(frame_buffer, dtype = torch.uint8)
+                    .to(device = 'cuda',non_blocking= True)
                     .permute(2, 0, 1)
                     .unsqueeze(0)
                     .div(255)
                     .contiguous()
                 )
+                
                 results = list(model(source=tensor,
                     imgsz=self.capture_dim,
                     conf = .5,
@@ -161,7 +175,7 @@ class Threaded:
                     iou=0.5,
                     device=0,
                     half=True,
-                    max_det=16,
+                    max_det=self.max_detections,
                     agnostic_nms=False,
                     augment=False,
                     vid_stride=False,
@@ -172,38 +186,39 @@ class Threaded:
                     show_conf=False,
                     save=False,
                     show=False))
+            #clearing flag later will result in more up to date data me thinks but lower fps
             
-            stream.synchronize()
             
             self.process_results(results[0], model.names)
-            self.new_detection_event.set()
-            self.detection_timestamp.value = time.perf_counter()  # Update detection timestamp
+            
+            self.is_inference_ready.set() 
+
 
     def aimbot_logic(self):
         last_fps_update = time.perf_counter()
-        last_detection_time = 0.0
         frame_count = 0
 
         
         while True:
-            self.new_detection_event.wait()
+            
+            self.is_inference_ready.wait()
             if self.cv_debug:
-                frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.latest_frame.buf).copy()
+                frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf).copy()
             if self.cv_debug:
                 cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
                 cv2.resizeWindow("Screen Capture Detection", *self.capture_dim[:2])
                 
-            with self.detection_timestamp.get_lock():
-                if self.detection_timestamp.value > last_detection_time:
-                    with self.detection_lock:
-                        count = self.detection_count[0]
-                        detections = [self.detections_shm[i] for i in range(count)]
-                    last_detection_time = self.detection_timestamp.value
-                    self.new_detection_event.clear()  # Reset flag
+
+            with self.detection_lock:
+                with self.detection_count_lock:
+                    num_detections = self.detection_count.value
+                    detections = [self.detections_shm[i] for i in range(num_detections)]
+
+            self.is_inference_ready.clear()#clear flag so it doesnt loop me thinks
             with self.key_lock:
                 key_state = self.is_key_pressed.value
 
-            if key_state:
+            if key_state and detections:
                 # print('2')
                 target_detection = self.select_target_bounding_box(detections)
                 self.move_mouse_to_bounding_box(target_detection)

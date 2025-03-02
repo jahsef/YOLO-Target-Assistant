@@ -22,20 +22,58 @@ class Main:
      
     def main(self):     
         self.debug = False
-        self.screen_center_x = 2560 / 2  # Replace with your screen's width / 2
-        self.screen_center_y = 1440 / 2  # Replace with your screen's height / 2
+        self.screen_x = 2560
+        self.screen_y = 1440
+        self.capture_dim = (1024,1024)
+        
         self.is_key_pressed = False
         self.frame_times = []
         self.time_interval_frames = 60
         self.results = []
         self.detections = []
 
-
-        
+        self.screen_center_x = self.screen_x // 2
+        # print(self.screen_center_x)
+        self.screen_center_y = self.screen_y // 2
+        # print(self.screen_center_y)
+        self.x_offset = (self.screen_x - self.capture_dim[0])//2
+        # print(self.x_offset)
+        self.y_offset = (self.screen_y - self.capture_dim[1])//2
+        # print(self.y_offset)
         threading.Thread(target=self.input_detection, daemon=True).start()
         threading.Thread(target=self.calculate_fps, daemon=True).start()
 
         # Run screen capture in the main thread
+        self.frame_num = 0
+        
+        self.frame_cap_time = 0
+        self.tensor_preprocess_time = 0
+        self.inference_time = 0
+        self.parsing_time = 0
+        self.clear_list_aimbot_time = 0
+        self.fps_calc_time = 0
+        def time_calc(time):
+            return time / self.frame_num
+        stop_event = threading.Event()
+
+        def fart():
+            while not stop_event.is_set():
+                time.sleep(1)
+            print('Shutting down')
+            print(f'frame cap time: {time_calc(self.frame_cap_time)}')
+            print(f'tensor preprocess time: {time_calc(self.tensor_preprocess_time)}')
+            print(f'inference time: {time_calc(self.inference_time)}')
+            print(f'parsing time: {time_calc(self.parsing_time)}')
+            print(f'clear list/aimbot time: {time_calc(self.clear_list_aimbot_time)}')
+            print(f'fps calc time: {time_calc(self.fps_calc_time)}')
+
+        threading.Thread(target=fart, daemon=True).start()
+
+        try:
+            self.run_screen_capture_detection()
+        except KeyboardInterrupt:
+            stop_event.set()
+
         self.run_screen_capture_detection()
 
     def aimbot(self):  
@@ -50,73 +88,61 @@ class Main:
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
 
     def select_target_bounding_box(self) -> tuple[int, int]:
-        # Precompute values for speed
-        screen_center_x = self.screen_center_x
-        screen_center_y = self.screen_center_y
-        x_offset = 560  #Adjust if this is dynamic
-
-        # Hysteresis configuration
-        HYSTERESIS_FACTOR = 1.1  # 10% score boost for previous target
-        PROXIMITY_THRESHOLD_SQ = 50**2  # 50px radius squared
-
-        head_targets = {}
-        zombie_targets = {}
-
-        # Get previous target's state
+        HYSTERESIS_FACTOR = 1.25
+        PROXIMITY_THRESHOLD_SQ = 50**2
+        screen_center = (self.screen_center_x, self.screen_center_y)
+        
+        # Track best candidates
+        best_head = (None, -1)
+        best_zombie = (None, -1)
         prev_center = getattr(self, 'prev_center', None)
         prev_class = getattr(self, 'prev_class', None)
 
         for detection in self.detections:
+            # Calculate bounding box properties
             x1, y1, x2, y2 = detection['bbox']
-            width = x2 - x1
-            height = y2 - y1
-            area = width * height  # Area calculation
+            width, height = x2 - x1, y2 - y1
+            area = width * height
+            
+            # Calculate center coordinates
+            center = ((x1 + x2)/2 + self.x_offset, 
+                    (y1 + y2)/2 + self.y_offset)
+            
+            # Calculate proximity score
+            dx = center[0] - screen_center[0]
+            dy = center[1] - screen_center[1]
+            dist_sq = dx*dx + dy*dy + 1e-6
+            score = (area ** 2) / (dist_sq ** 0.75)
 
-            # Calculate center coordinates with offset
-            center_x = ((x1 + x2) / 2) + x_offset
-            center_y = (y1 + y2) / 2
-            curr_center = (center_x, center_y)
-
-            # Distance squared from screen center (avoids sqrt)
-            dx = center_x - screen_center_x
-            dy = center_y - screen_center_y
-            dist_sq = dx*dx + dy*dy + 1e-6  # Prevent division by zero
-
-            # Weighted score formula (adjust exponents here)
-            score = (area ** 2) / (dist_sq ** 0.75)  # Equivalent to original formula
-
-            # Apply hysteresis boost to previous target if detected again
-            if prev_center and detection['class_name'] == prev_class:
-                dx_prev = center_x - prev_center[0]
-                dy_prev = center_y - prev_center[1]
-                if dx_prev*dx_prev + dy_prev*dy_prev <= PROXIMITY_THRESHOLD_SQ:
+            # Apply hysteresis to previous target
+            if prev_class == detection['class_name'] and prev_center:
+                dx_prev = center[0] - prev_center[0]
+                dy_prev = center[1] - prev_center[1]
+                if (dx_prev*dx_prev + dy_prev*dy_prev) <= PROXIMITY_THRESHOLD_SQ:
                     score *= HYSTERESIS_FACTOR
 
-            # Store in appropriate dictionary
+            # Update best candidates
             if detection['class_name'] == 'Head':
-                head_targets[curr_center] = score
+                if score > best_head[1]:
+                    best_head = (center, score)
             else:
-                zombie_targets[curr_center] = score
+                if score > best_zombie[1]:
+                    best_zombie = (center, score)
 
-        # Helper function to find best target
-        def get_best(detections):
-            return max(detections.items(), key=lambda x: x[1], default=(None, 0))
-
-        best_head, head_score = get_best(head_targets)
-        best_zombie, zombie_score = get_best(zombie_targets)
-
-        # Determine new target with class priority
-        new_target = best_head or best_zombie
-        new_class = 'Head' if best_head else 'Zombie' if best_zombie else None
+        # Select target with class priority
+        new_target = None
+        if best_head[0]:
+            new_target = best_head[0]
+        elif best_zombie[0]:
+            new_target = best_zombie[0]
 
         # Update previous target tracking
-        self.prev_center = new_target if new_target else self.prev_center
-        self.prev_class = new_class if new_target else self.prev_class
-
-        # Fallback logic
-        if not new_target:
-            return self.prev_center or (screen_center_x, screen_center_y)
-        return new_target
+        if new_target:
+            self.prev_center = new_target
+            self.prev_class = 'Head' if best_head[0] else 'Zombie'
+        
+        # Fallback to previous target or screen center
+        return new_target or getattr(self, 'prev_center', None) or screen_center
 
     def input_detection(self):
         def on_key_press(event):
@@ -126,56 +152,78 @@ class Main:
         keyboard.on_press(on_key_press)
         while True:
             time.sleep(2)
-
+    @torch.inference_mode()
     def run_screen_capture_detection(self):
-        capture_region =[560,0,2000,1440]
-        #[560,0,2000,1440] center of screen
-        #[768, 180, 1792, 1260]
-        
+        capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
+
         cwd = os.getcwd()
         
-        # model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.engine"))
-        model = YOLO(os.path.join(cwd, "runs/detect/tune4/weights/best.engine"))
-        device = torch.device("cuda")
+        # model = YOLO(os.path.join(cwd,"runs//train//train_run//weights//best.pt"))
+        # model = YOLO(os.path.join(cwd, "runs/detect/tune4/weights/best.engine"))
+        model = YOLO(os.path.join(cwd, "runs/train/1024x1024_batch12/weights/best.engine"))
+        
         
         if self.debug:
-            window_width, window_height = capture_region[2] - capture_region[0],capture_region[3]-capture_region[1]
+            window_width, window_height = self.capture_dim
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
         
-        camera = dxcam.create(region = capture_region, output_color='RGB',max_buffer_len=2)
-        # camera.start(target_fps = 160, video_mode= True)
+        camera = dxcam.create(region = capture_region, output_color='BGR',max_buffer_len=2)#yolo does bgr -> rgb conversion in model.predict automatically
+
         if camera is None:
             print("Camera initialization failed.")
             return
-        frame_num = 0
+        frame_count = 0
+        last_fps_update = time.perf_counter()
+
         while True:
-            print(f'frame: {frame_num}')
-            start = time.time_ns()
-            profiling_start = start
-            frame = camera.grab()
+            # time.sleep(.5)
+            # print(f'\nframe: {self.frame_num}')
+            self.frame_num+=1
+            start = time.perf_counter()
             
+            frame = camera.grab()
             if frame is None:
-                print("frame none")
+                # print("frame none")
                 time.sleep(.01)
                 continue
-            print(f'frame grab time: { (time.time_ns()-profiling_start)/1e6:.2f}')
-            profiling_start = time.time_ns()
-            # 2. Convert to tensor WITH PROPER FORMATTING
+            self.frame_cap_time += time.perf_counter()- start
             
-            img_tensor = torch.from_numpy(frame).to(device)
-            img_tensor = img_tensor.permute(2, 0, 1)        # HWC -> CHW
-            img_tensor = img_tensor.unsqueeze(0)            # Add batch dim -> BCHW
-            img_tensor = img_tensor.half() / 255.0          # Normalize AFTER casting
-            img_tensor = img_tensor.contiguous()            # Critical for TensorRT
-            print(f'tensor pre processing time: { (time.time_ns()-profiling_start)/1e6:.2f}')
             # with torch.no_grad():
+
+            start = time.perf_counter()
+            tensor = (
+                torch.as_tensor(frame,device = 'cuda')
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .div(255)
+                .contiguous()
+            )
+            self.tensor_preprocess_time +=time.perf_counter()- start
+
+            start = time.perf_counter()
+
+            self.results = list(model(source=tensor,
+                imgsz=self.capture_dim,
+                conf = .5,
+                stream=True,
+                iou=0.5,
+                device=0,
+                half=True,
+                max_det=16,
+                agnostic_nms=False,
+                augment=False,
+                vid_stride=False,
+                visualize=False,
+                verbose=True,
+                show_boxes=False,
+                show_labels=False,
+                show_conf=False,
+                save=False,
+                show=False))
+            self.inference_time += time.perf_counter()- start
             
-            profiling_start = time.time_ns()
-            self.results = model(source=img_tensor, conf=0.6, imgsz=(1440,1440)) 
-            print(f'inference time: { (time.time_ns()-profiling_start)/1e6:.2f}')
-            
-            profiling_start = time.time_ns()
+            start = time.perf_counter()
             for box in self.results[0].boxes:
                 detection = {
                     "class_name": model.names[int(box.cls[0])],
@@ -183,30 +231,36 @@ class Main:
                     "confidence": float(box.conf[0])
                 }
                 self.detections.append(detection)
-            print(f'detection parsing time: { (time.time_ns()-profiling_start)/1e6:.2f}')
-            
+            self.parsing_time += time.perf_counter()- start
             
             if self.debug:
-                profiling_start = time.time_ns()
-                display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)#opencv does bgr while yolo needs rgb
+                # display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 for obj in self.detections:
                     x1, y1, x2, y2 = obj['bbox']
                     label = f"{obj['class_name']} {obj['confidence']:.2f}"
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
-                    cv2.putText(display_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
                 
-                cv2.imshow("Screen Capture Detection", display_frame)
+                cv2.imshow("Screen Capture Detection", frame)
                 cv2.waitKey(1)
-                print(f'opencv render time: { (time.time_ns()-profiling_start)/1e6:.2f}')
                 
-            profiling_start = time.time_ns()
+            start = time.perf_counter()
             if(self.is_key_pressed and self.detections):
                 self.aimbot()
             self.detections.clear()
-            print(f'aimbot time: { (time.time_ns()-profiling_start)/1e6:.2f}')
-            end = time.time_ns()
-            runtime_ms = (end - start)/1000000
-            self.append_time(runtime_ms)
+            self.clear_list_aimbot_time += time.perf_counter()- start
+            
+            start = time.perf_counter()
+            # Trim unused entries
+            
+            frame_count+=1
+            current_time = time.perf_counter()
+            if current_time - last_fps_update >= 1:
+                fps = frame_count / (current_time - last_fps_update)
+                last_fps_update = current_time
+                frame_count = 0
+                print(f'fps: {fps:.2f}')
+            self.fps_calc_time += time.perf_counter()- start
 
     def append_time(self, time):
         
