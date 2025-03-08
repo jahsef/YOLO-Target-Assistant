@@ -2,6 +2,7 @@ import cv2
 import os
 
 def extract_frames(video_path, output_folder, interval):
+    
     # Ensure the output folder exists
     os.makedirs(output_folder, exist_ok=True)
 
@@ -17,7 +18,8 @@ def extract_frames(video_path, output_folder, interval):
     # Start frame extraction
     saved_frame_count = 0  # To count the number of frames saved
     frame_count = 0
-
+    
+    counter = 1
     while frame_count < total_frames:
         # Skip frames to reach the correct frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
@@ -25,7 +27,18 @@ def extract_frames(video_path, output_folder, interval):
         success, frame = cap.read()
 
         if success:
-            frame_filename = os.path.join(output_folder, f"frame_{saved_frame_count}.jpg")
+            # Handle duplicate filenames for images
+            base_name = f'frame_{saved_frame_count}'
+            ext = '.jpg'
+            frame_filename = os.path.join(output_folder, f"{base_name}{ext}")
+            
+            # Check for duplicate filenames
+            
+            while os.path.exists(frame_filename):
+                frame_filename = os.path.join(output_folder, f"{base_name}({counter}){ext}")
+                counter += 1
+
+            # Save the frame
             cv2.imwrite(frame_filename, frame)
             saved_frame_count += 1
 
@@ -37,13 +50,18 @@ def extract_frames(video_path, output_folder, interval):
 
 # Example usage
 cwd = os.getcwd()
-list_videos = os.listdir(os.path.join(cwd,'videos'))
-for video in list_videos:
-    poop = video[:video.index('.')]
+list_videos = os.listdir(os.path.join(cwd, r'train\video_processing\videos_to_convert'))
 
-    os.makedirs(os.path.join(cwd,'output',poop), exist_ok=True)
+for video in list_videos:
+    print(f"Processing video: {video}")
+    
+    # Construct paths
+    video_path = os.path.join(cwd, r'train\video_processing\videos_to_convert', video)
+    output_folder = os.path.join(cwd, r'train\video_processing\converted_videos')
+
+    # Extract frames from the video
     extract_frames(
-        video_path=os.path.join(cwd, 'videos', video),
-        output_folder=os.path.join(cwd, "output",poop),
-        interval=240  # For example, save every 300th frame
+        video_path=video_path,
+        output_folder=output_folder,
+        interval=36  # For example, save every 5th frame
     )

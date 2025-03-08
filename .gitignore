@@ -1,0 +1,12 @@
+#no dataset jajaja
+*.mp4
+*.jpg
+*.zip
+*.txt
+*.png
+*.npy
+*.pt
+*.engine
+
+runs/
+__pycache__/

@@ -2,6 +2,7 @@ import os
 import shutil
 from sklearn.model_selection import train_test_split
 import yaml
+from collections import deque
 
 # Define paths
 cwd = os.getcwd()
@@ -9,94 +10,111 @@ base_dir = os.path.join(cwd, 'train')
 pre_split_dir = os.path.join(base_dir, 'pre_split_dataset')
 split_dir = os.path.join(base_dir, 'split_dataset')
 
-images_dir = os.path.join(pre_split_dir, 'images/train')
-labels_dir = os.path.join(pre_split_dir, 'labels/train')
+images_dir = os.path.join(pre_split_dir, 'images')
+labels_dir = os.path.join(pre_split_dir, 'labels')
 data_yaml_path = os.path.join(pre_split_dir, 'data.yaml')
-train_txt_path = os.path.join(pre_split_dir, 'train.txt')
 
 train_images_dir = os.path.join(split_dir, 'images/train')
 val_images_dir = os.path.join(split_dir, 'images/val')
 train_labels_dir = os.path.join(split_dir, 'labels/train')
 val_labels_dir = os.path.join(split_dir, 'labels/val')
-split_train_txt_path = os.path.join(split_dir, 'train.txt')
-split_val_txt_path = os.path.join(split_dir, 'val.txt')
 
+split_train_txt = os.path.join(split_dir, 'train.txt')
+split_val_txt = os.path.join(split_dir, 'val.txt')
 
-# Clear split_dataset directory before copying new files
 def clear_directory(directory):
     for filename in os.listdir(directory):
         file_path = os.path.join(directory, filename)
         try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
+            if os.path.isfile(file_path):
                 os.remove(file_path)
             elif os.path.isdir(file_path):
-                shutil.rmtree(file_path, ignore_errors=True)
+                shutil.rmtree(file_path)
         except Exception as e:
             print(f"Error deleting {file_path}: {e}")
 
-# Create directories for split_dataset if they don't exist
 clear_directory(split_dir)
-os.makedirs(split_dir, exist_ok=True)
 os.makedirs(train_images_dir, exist_ok=True)
 os.makedirs(val_images_dir, exist_ok=True)
 os.makedirs(train_labels_dir, exist_ok=True)
 os.makedirs(val_labels_dir, exist_ok=True)
 
+def bfs_find_files(root_dir, extensions):
+    files = []
+    queue = deque([root_dir])
+    while queue:
+        current_dir = queue.popleft()
+        try:
+            for entry in os.listdir(current_dir):
+                full_path = os.path.join(current_dir, entry)
+                if os.path.isdir(full_path):
+                    queue.append(full_path)
+                elif os.path.isfile(full_path) and entry.lower().endswith(extensions):
+                    files.append(full_path)
+        except Exception as e:
+            print(f"Error accessing {current_dir}: {e}")
+    return files
 
+image_files = bfs_find_files(images_dir, ('.jpg', '.png', '.jpeg'))
 
-# Get the list of all images (assuming .jpg, .png, or similar extensions)
-image_files = [f for f in os.listdir(images_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
-
-# Split the list of images into train and validation sets (80% train, 20% val)
 train_images, val_images = train_test_split(image_files, test_size=0.2, random_state=42)
 
-# Function to safely copy images and labels
-def copy_image_and_label(img, source_img_dir, target_img_dir, source_label_dir, target_label_dir):
-    # Copy image file
-    try:
-        shutil.copy2(os.path.join(source_img_dir, img),os.path.join(target_img_dir,img))
-    except FileNotFoundError as e:
-        print(f"Error copying image file {img}: {e}")
-        return
+def copy_image_and_label(img, target_img_dir, target_label_dir):
+    base_name = os.path.basename(img)
+    new_name = base_name
+    counter = 1
+    
+    # Handle duplicate filenames for images
+    while os.path.exists(os.path.join(target_img_dir, new_name)):
+        name_without_ext, ext = os.path.splitext(base_name)
+        new_name = f"{name_without_ext}({counter}){ext}"
+        counter += 1
+    
+    # Copy image
+    shutil.copy2(img, os.path.join(target_img_dir, new_name))
+    
+    # Determine original label path using the original image's relative path
+    img_rel_path = os.path.relpath(img, images_dir)
+    original_label_path = os.path.splitext(img_rel_path)[0] + '.txt'
+    original_label_full_path = os.path.join(labels_dir, original_label_path)
+    
+    if os.path.exists(original_label_full_path):
+        # Create new label name based on new image name
+        new_label_name = os.path.splitext(new_name)[0] + '.txt'
+        # Copy label to target directory
+        shutil.copy2(original_label_full_path, os.path.join(target_label_dir, new_label_name))
+    
+    return new_name
 
-    # Copy corresponding label file
-    label_file = os.path.splitext(img)[0] + ".txt"
-    label_path = os.path.join(source_label_dir, label_file)
-    if os.path.exists(label_path):
-        try:
-            shutil.copy2(label_path, os.path.join(target_label_dir, label_file))
-        except FileNotFoundError as e:
-            print(f"Error copying label file {label_file}: {e}")
-    else:
-        print(f"Warning: No label found for image {img}. Skipping this image.")
-
-# Copy images and labels into their respective directories
+# Collect new filenames
+train_new_names = []
 for img in train_images:
-    copy_image_and_label(img, images_dir, train_images_dir, labels_dir, train_labels_dir)
+    new_name = copy_image_and_label(img, train_images_dir, train_labels_dir)
+    train_new_names.append(new_name)
 
+val_new_names = []
 for img in val_images:
-    copy_image_and_label(img, images_dir, val_images_dir, labels_dir, val_labels_dir)
+    new_name = copy_image_and_label(img, val_images_dir, val_labels_dir)
+    val_new_names.append(new_name)
 
-# Update data.yaml file to reflect the new train/val paths
-with open(data_yaml_path, 'r') as yaml_file:
-    data_yaml = yaml.safe_load(yaml_file)
+# Create text files with new filenames
+with open(split_train_txt, 'w') as f:
+    for name in train_new_names:
+        f.write(f"images/train/{name}\n")
 
-# Modify the paths in data.yaml to point to the new train/val directories
-data_yaml['train'] = os.path.join(split_dir, 'images/train')
-data_yaml['val'] = os.path.join(split_dir, 'images/val')
+with open(split_val_txt, 'w') as f:
+    for name in val_new_names:
+        f.write(f"images/val/{name}\n")
 
-# Save the updated data.yaml
-updated_data_yaml_path = os.path.join(split_dir, 'data.yaml')
-with open(updated_data_yaml_path, 'w') as yaml_file:
-    yaml.dump(data_yaml, yaml_file)
+# Update data.yaml
+with open(data_yaml_path, 'r') as f:
+    data_yaml = yaml.safe_load(f)
 
-# Create or update train.txt and val.txt for listing image filenames
-with open(split_train_txt_path, 'w') as f:
-    for img in train_images:
-        f.write(f"{os.path.join('images/train', img)}")
+data_yaml['path'] = split_dir
+data_yaml['train'] = os.path.join('images', 'train')
+data_yaml['val'] = os.path.join('images', 'val')
 
-with open(split_val_txt_path, 'w') as f:
-    for img in val_images:
-        f.write(f"{os.path.join('images/val', img)}")
+with open(os.path.join(split_dir, 'data.yaml'), 'w') as f:
+    yaml.dump(data_yaml, f)
 
-print("Dataset split into train and validation sets successfully!")
+print("Split complete. Labels properly handled with flat directory structure")
