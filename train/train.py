@@ -15,7 +15,7 @@ def main():
 
     # Load the YOLOv8 model (pretrained or custom)
     model = YOLO("yolo11m.pt")  # Use the YOLOv8 pre-trained weights or your own
-    model = YOLO(r"C:\Users\kevin\Documents\GitHub\YOLO11-Enfartment-PoopPS\runs\train\EFPS_3000image_1440p_200epoch_batch3_11m\weights/epoch50.pt")
+    model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_1440p_200epoch_batch3_11m/weights/epoch50.pt"))
     
     # model = YOLO(os.path.join(cwd, "runs/train/EFPS_1863transferfrom1400_1440x1440_10epoch_batch6_11s/weights/best.pt"))
     # Train the model
@@ -41,8 +41,3 @@ def main():
 
     model.save()
     
-
-print("Training complete!")
-
-if __name__ == "__main__":
-    main()     
