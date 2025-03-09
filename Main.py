@@ -1,22 +1,26 @@
 from ultralytics import YOLO
 import cv2
-import numpy as np
-# import dxcam
-import bettercam
 import threading
 import time
 import keyboard
-import logging
 import win32api
 import win32con
 import os
 import torch
-
+import sys
+from pathlib import Path
+import cupy as cp
+import numpy as np
+github_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
+#can replace with bettercam just no cupy support
+import betterercam
+print(betterercam.__file__)
 
 class Main:
      
     def main(self):     
-        self.debug = True
+        self.debug = False
         self.screen_x = 2560
         self.screen_y = 1440
         self.h_w_capture = (896,1440)#height,width
@@ -120,17 +124,25 @@ class Main:
         while True:
             time.sleep(1)
             
-    def preprocess(self,frame: np.ndarray):
-        # Use in-place normalization to avoid copies
-        return (
-            torch.as_tensor(frame,dtype = torch.uint8)
-            .to(torch.device('cuda'), non_blocking=True)
-            .permute(2, 0, 1)
-            .unsqueeze_(0)  # In-place add batch dim
-            .half()        
-            .div_(255.0)    # In-place normalization
-            .contiguous() #need for tensorrt
-        )
+
+    
+    #only like a 5% speedup using cupy, need to look into that some more
+    #also python doesnt have method overloading by parameter type
+    def preprocess(self,frame: cp.ndarray) -> torch.Tensor:
+        bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
+        float_frame = bchw.astype(cp.float16, copy=False)/255.0
+        return torch.as_tensor(float_frame, device='cuda')
+    
+    # def preprocess(self,frame: np.ndarray) -> torch.Tensor:
+    #     # Use in-place normalization to avoid copies
+    #     return (
+    #         torch.as_tensor(frame,device = 'cuda',dtype = torch.uint8)
+    #         .permute(2, 0, 1)
+    #         .unsqueeze_(0)  # In-place add batch dim
+    #         .half()        
+    #         .div_(255.0)    # In-place normalization
+    #         .contiguous() #need for tensorrt
+    #     )
     @torch.inference_mode()
     def run_screen_capture_detection(self):
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
@@ -147,21 +159,13 @@ class Main:
             window_height, window_width = self.h_w_capture
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
+        camera = betterercam.create(region = capture_region, output_color='BGR',max_buffer_len=2, nvidia_gpu = True)#yolo does bgr -> rgb conversion in model.predict automatically
         
-        camera = bettercam.create(region = capture_region, output_color='BGR',max_buffer_len=2)#yolo does bgr -> rgb conversion in model.predict automatically
-
-        if camera is None:
-            print("Camera initialization failed.")
-            return
         frame_count = 0
         last_fps_update = time.perf_counter()
         while True:
-            
             frame = camera.grab()
-            
             if frame is None:
-                # print("frame none")
-                # time.sleep(.001)
                 continue
             gpu_frame = self.preprocess(frame)
 
@@ -179,19 +183,18 @@ class Main:
                 self.detections.append(detection)
             
             if self.debug:
-                # display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                display_frame = cp.asnumpy(frame)
                 for obj in self.detections:
                     x1, y1, x2, y2 = obj['bbox']
                     label = f"{obj['class_name']} {obj['confidence']:.2f}"
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
-                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
+                    cv2.putText(display_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
                 
-                cv2.imshow("Screen Capture Detection", frame)
+                cv2.imshow("Screen Capture Detection", display_frame)
                 cv2.waitKey(1)
                 
             if(self.is_key_pressed and self.detections):
                 self.aimbot()
-            # Trim unused entries
             self.detections.clear()
             frame_count+=1
             current_time = time.perf_counter()

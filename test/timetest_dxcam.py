@@ -1,20 +1,15 @@
-import dxcam
+# import dxcam
 import bettercam
 import os
 import time
 import cv2
 
-screen_x = 2560
-screen_y = 1440
-h_w_capture = (896,1440)#height,width
-x_offset = (screen_x - h_w_capture[1])//2
-y_offset = (screen_y - h_w_capture[0])//2#reversed because h_w
-capture_region = (0 + x_offset, 0 + y_offset, screen_x - x_offset, screen_y - y_offset)
+
 
 # camera = dxcam.create(region = capture_region)
-camera = bettercam.create(region = capture_region, nvidia_gpu=False)
+camera = bettercam.create(nvidia_gpu=False)
 
-window_height, window_width = h_w_capture
+window_height, window_width = 1440,2560
 # cv2.namedWindow("Screen Capture", cv2.WINDOW_NORMAL)
 # cv2.resizeWindow("Screen Capture", window_width, window_height)
 
