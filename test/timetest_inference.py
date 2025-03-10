@@ -19,7 +19,7 @@ print(betterercam.__file__)
 cwd = os.getcwd()
 img_path = os.path.join(cwd, 'train/split_dataset/images/train/frame_1.jpg')
 
-model  = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.engine"))
+# model  = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.engine"))
 
 img = cv2.imread(img_path)
 np_img = cv2.resize(img, (1440, 896))  # Resize to model input size
@@ -61,33 +61,33 @@ camera = betterercam.create(region = capture_region, nvidia_gpu = True)
 
 
 
-img_tensor = preprocess(img)
-for _ in range(16):
-    with torch.no_grad():
-        _ = model(img_tensor,imgsz = (896,1440), verbose = False)
+# img_tensor = preprocess(cp_img)
+# for _ in range(16):
+#     with torch.no_grad():
+#         _ = model(img_tensor,imgsz = (896,1440), verbose = False)
 
 
 print('Starting FPS test')
 
 @torch.inference_mode()
 def fart():
-    for _ in range(64):
+    for _ in range(640):
         
         # frame = camera.grab()
         # if frame is None:
         #     continue
-        gpu_frame = preprocess(cp_img)
-        results = model(source=gpu_frame,
-            conf = .6,
-            imgsz=h_w_capture,
-            device=0,
-            verbose = False
-        )
+        gpu_frame = preprocess(np_img)
+        # results = model(source=gpu_frame,
+        #     conf = .6,
+        #     imgsz=h_w_capture,
+        #     device=0,
+        #     verbose = False
+        # )
 
 start = time.perf_counter()
-for _ in range(16):
+for _ in range(10):
     fart()
 inference_time = time.perf_counter() - start
 # print(f"Model: {model_name}")
 print(f"Inference time: {inference_time:.4f} sec")
-print(f"FPS: {(64*16)/inference_time:.2f}")
+print(f"FPS: {(640*10)/inference_time:.2f}")

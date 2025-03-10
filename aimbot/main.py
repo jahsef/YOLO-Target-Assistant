@@ -11,11 +11,13 @@ import sys
 from pathlib import Path
 import cupy as cp
 import numpy as np
-github_dir = Path(__file__).parent.parent
+github_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
-#can replace with bettercam just no cupy support
+# can replace with bettercam just no cupy support
 import betterercam
-print(betterercam.__file__)
+# print(betterercam.__file__)
+from aimbot.utils import TargetSelector
+
 
 class Main:
      
@@ -24,96 +26,29 @@ class Main:
         self.screen_x = 2560
         self.screen_y = 1440
         self.h_w_capture = (896,1440)#height,width
-        self.head_toggle = True
         self.is_key_pressed = False
         self.results = []
         self.detections = []
-        self.screen_center_x = self.screen_x // 2
-        self.screen_center_y = self.screen_y // 2
+        self.screen_center = (self.screen_x // 2,self.screen_y // 2)
         self.x_offset = (self.screen_x - self.h_w_capture[1])//2
-        self.y_offset = (self.screen_y - self.h_w_capture[0])//2#reversed because h_w
+        self.y_offset = (self.screen_y - self.h_w_capture[0])//2
+        head_toggle = True
+        self.target_selector = TargetSelector(hysteresis= 1.5, proximity_threshold_sq= 75**2, screen_center=self.screen_center, x_offset=self.x_offset, y_offset= self.y_offset, head_toggle= head_toggle)
         threading.Thread(target=self.input_detection, daemon=True).start()
         # self.y_bottom_deadzone = 200
+        
         self.run_screen_capture_detection()
 
     def aimbot(self):  
-        detection = self.select_target_bounding_box()
-        self.move_mouse_to_bounding_box(detection)
+        target_bb = self.target_selector.get_target(self.detections)
+        self.move_mouse_to_bounding_box(target_bb)
                 
     def move_mouse_to_bounding_box(self, detection):
         center_bb_x = detection[0]
         center_bb_y = detection[1]
-        delta_x = center_bb_x - self.screen_center_x
-        delta_y = center_bb_y - self.screen_center_y
+        delta_x = center_bb_x - self.screen_center[0]
+        delta_y = center_bb_y - self.screen_center[1]
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
-
-    def select_target_bounding_box(self) -> tuple[int, int]:
-        HYSTERESIS_FACTOR = 1.25
-        PROXIMITY_THRESHOLD_SQ = 50**2
-        screen_center = (self.screen_center_x, self.screen_center_y)
-        
-        # Track best candidate
-        best_enemy = (None, -1)  # (center, score)
-        prev_center = getattr(self, 'prev_center', None)
-        prev_class = getattr(self, 'prev_class', None)
-
-        for detection in self.detections:
-            if detection['class_name'] != 'Enemy':  # Only process Enemy class
-                continue
-
-            # Calculate bounding box properties
-            x1, y1, x2, y2 = detection['bbox']
-            # if y1 >= self.screen_y - self.y_bottom_deadzone:
-            #     continue
-            width, height = x2 - x1, y2 - y1
-            area = width * height
-            
-            # Calculate center coordinates
-            center = ((x1 + x2) / 2 + self.x_offset, 
-                      (y1 + y2) / 2 + self.y_offset)
-            
-            # Calculate proximity score
-            dx = center[0] - screen_center[0]
-            dy = center[1] - screen_center[1]
-            dist_sq = dx * dx + dy * dy + 1e-6  # Avoid division by zero
-            score = (area ** 2) / (dist_sq ** 0.75)
-
-            # Apply hysteresis to previous target
-            if prev_class == 'Enemy' and prev_center:
-                dx_prev = center[0] - prev_center[0]
-                dy_prev = center[1] - prev_center[1]
-                if (dx_prev * dx_prev + dy_prev * dy_prev) <= PROXIMITY_THRESHOLD_SQ:
-                    score *= HYSTERESIS_FACTOR
-
-            # Update best enemy candidate
-            if score > best_enemy[1]:
-                best_enemy = (center, score)
-
-        # Select target
-        new_target = best_enemy[0] if best_enemy[0] else None
-
-        # Update previous target tracking
-        if new_target:
-            self.prev_center = new_target
-            self.prev_class = 'Enemy'
-            if self.head_toggle:
-                 #aims 25% above center
-                height = y2 - y1
-
-                if height > 95:  # Big target
-                    offset_percentage = 0.35
-                elif height > 35:  # Medium target
-                    offset_percentage = 0.25
-                else:  # Small target
-                    offset_percentage = 0.15
-
-                offset = int(height * offset_percentage)
-                
-                return (new_target[0], new_target[1] - offset)
-        
-        # Fallback to previous target or screen centerew 
-
-        return new_target or screen_center
 
     def input_detection(self):
         def on_key_press(event):
@@ -145,8 +80,9 @@ class Main:
     #     )
     @torch.inference_mode()
     def run_screen_capture_detection(self):
+        
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
-
+        
         cwd = os.getcwd()
         
         # model  = YOLO(os.path.join(cwd,"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))

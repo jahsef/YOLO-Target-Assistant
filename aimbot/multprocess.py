@@ -1,4 +1,4 @@
-import dxcam
+import bettercam
 import cv2
 import os
 import torch
@@ -12,6 +12,7 @@ import numpy as np
 from ctypes import Structure, c_int, c_float, c_bool, c_double
 import win32api
 import win32con
+
 
 
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
@@ -99,7 +100,7 @@ class Threaded:
             self.frame_shm.unlink()
 
     def screen_cap(self):
-        camera = dxcam.create(
+        camera = bettercam.create(
             region=(self.x_offset, self.y_offset, 
                    self.screen_x - self.x_offset, self.screen_y - self.y_offset),
             output_color="BGR",
