@@ -62,9 +62,9 @@ class TargetSelector:
             if self.head_toggle:
                 height = y2 - y1
                 if height > 85:  # Big target
-                    offset_percentage = 0.4
+                    offset_percentage = 0.35
                 elif height > 25:  # Medium target
-                    offset_percentage = 0.3
+                    offset_percentage = 0.27
                 else:  # Small target
                     offset_percentage = 0.15
                 offset = int(height * offset_percentage)

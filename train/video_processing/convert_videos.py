@@ -49,7 +49,7 @@ def extract_frames(video_path, output_folder, interval):
     print("Frame extraction completed.")
 
 # Example usage
-cwd = os.getcwd()
+cwd = os.getcwd()#train\video_processing\
 list_videos = os.listdir(os.path.join(cwd, r'train\video_processing\videos_to_convert'))
 
 for video in list_videos:
@@ -63,5 +63,5 @@ for video in list_videos:
     extract_frames(
         video_path=video_path,
         output_folder=output_folder,
-        interval=36  # For example, save every 5th frame
+        interval=30  # For example, save every 5th frame
     )

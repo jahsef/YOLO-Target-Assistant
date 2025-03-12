@@ -1,6 +1,0 @@
-names:
-  0: Enemy
-  1: Friendly
-path: .
-train: images\train
-val: images\val

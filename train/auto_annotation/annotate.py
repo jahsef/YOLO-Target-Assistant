@@ -5,6 +5,8 @@ import cv2
 import shutil
 import numpy as np
 import logging
+import cupy as cp
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,7 +18,7 @@ labels_path = os.path.join(cwd, 'train/auto_annotation/data/labels/train')
 # Ensure the labels directory exists
 os.makedirs(labels_path, exist_ok=True)
 
-img_dim = (1440, 896)  # Image dimensions (width, height)
+img_dim = (1440, 1440)  # Image dimensions (width, height)
 
 
 def clear_directory(directory):
@@ -36,8 +38,11 @@ def clear_directory(directory):
 clear_directory(labels_path)
 
 # Load the trained model
-model = YOLO(os.path.join(cwd, "runs/train/EFPS_1863transferfrom1400_1440x1440_10epoch_batch6_11s/weights/best.pt"))
-
+model = YOLO(os.path.join(cwd, "runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
+def preprocess(frame: cp.ndarray) -> torch.Tensor:
+    bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
+    float_frame = bchw.astype(cp.float16, copy=False)/255.0
+    return torch.as_tensor(float_frame, device='cuda')
 
 def inference(img_path):
     """Performs inference on the given image."""
@@ -46,21 +51,15 @@ def inference(img_path):
         if img is None:
             logging.warning(f"Failed to read image: {img_path}")
             return None
+        
 
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-        img_tensor = (
-            torch.from_numpy(img)
-            .to(torch.device("cuda"))
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-            .half()
-            .div(255.0)
-            .contiguous()
-        )
-        return model.predict(img_tensor, imgsz=(896, 1440), conf=0.4, verbose=False)
+        # print('here')
+        
+        img = preprocess(cp.asarray(img))
+        return model.predict(device = 0, source = img, imgsz=(img_dim[1], img_dim[0]), conf=0.4, verbose=False)
     except Exception as e:
         logging.error(f"Error during inference for {img_path}: {e}")
+        # print('bomb')
         return None
 
 
@@ -70,11 +69,10 @@ def write_annotations(results, img_path):
 
     # Handle background images
     if len(boxes) == 0:  # No detections
-        if np.random.rand() > 0.15:  # Keep 15% of background images
+        if np.random.rand() > 0.13:  # Keep 15% of background images
             os.remove(img_path)
             logging.info(f"Deleted background image: {img_path}")
         return
-
     # Determine if the image is friendly-only
     only_friendly = True
     for box in boxes:
@@ -82,7 +80,6 @@ def write_annotations(results, img_path):
         if class_name == 'Enemy':
             only_friendly = False
             break  # Exit early if an "Enemy" is found
-
     # Handle friendly-only images
     if only_friendly:
         if np.random.rand() > 0.08:  # Keep 8% of friendly-only images
@@ -90,12 +87,16 @@ def write_annotations(results, img_path):
             logging.info(f"Deleted friendly-only image: {img_path}")
             return
 
-    # Handle high-confidence enemy images
-    if any(box.cls[0] == 'Enemy' for box in boxes):  # Check if there are any "Enemy" detections
-        if all(box.conf[0] > 0.75 for box in boxes if box.cls[0] == 'Enemy'):
+    if any(box.cls[0] == 'Enemy' for box in boxes):  #removes only high confidence enemy detections
+        if all(box.conf[0] > 0.9 for box in boxes if box.cls[0] == 'Enemy'):
             os.remove(img_path)
             logging.info(f"Removed high-confidence enemy image: {img_path}")
             return
+        
+    if np.random.rand() > 0.4:  #bomb 60% of the stuff anyway
+        os.remove(img_path)
+        logging.info(f"bombed image: {img_path}")
+        return
     # Write annotations for detected objects
     for box in boxes:
         class_name = model.names[int(box.cls[0])]
@@ -129,8 +130,12 @@ def write_annotations(results, img_path):
 
 # Process all images in the images directory
 list_images = os.listdir(images_path)
+# print(len(list_images))
 for image in list_images:
+    # print('iteration')
     image_path = os.path.join(images_path, image)
+    # print('inferencing!!!')
     results = inference(image_path)
+    # print(type(results))
     if results:
         write_annotations(results, image_path)

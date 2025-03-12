@@ -3,12 +3,13 @@ import shutil
 from sklearn.model_selection import train_test_split
 import yaml
 from collections import deque
-
+import time
 # Define paths
 cwd = os.getcwd()
 base_dir = os.path.join(cwd, 'train')
 pre_split_dir = os.path.join(base_dir, 'pre_split_dataset')
-split_dir = os.path.join(base_dir, 'split_dataset')
+new_dir_name = "datasets//EFPS_4000img"
+split_dir = os.path.join(base_dir, new_dir_name)
 
 images_dir = os.path.join(pre_split_dir, 'images')
 labels_dir = os.path.join(pre_split_dir, 'labels')
@@ -22,6 +23,10 @@ val_labels_dir = os.path.join(split_dir, 'labels/val')
 split_train_txt = os.path.join(split_dir, 'train.txt')
 split_val_txt = os.path.join(split_dir, 'val.txt')
 
+# print(split_dir)
+# time.sleep(1000)
+
+
 def clear_directory(directory):
     for filename in os.listdir(directory):
         file_path = os.path.join(directory, filename)
@@ -33,6 +38,7 @@ def clear_directory(directory):
         except Exception as e:
             print(f"Error deleting {file_path}: {e}")
 
+os.makedirs(split_dir, exist_ok=True)
 clear_directory(split_dir)
 os.makedirs(train_images_dir, exist_ok=True)
 os.makedirs(val_images_dir, exist_ok=True)
