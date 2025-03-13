@@ -29,7 +29,7 @@ class Detection(Structure):
 
 class Threaded:
     def __init__(self):
-        self.fps_debug = True
+        self.fps_debug = False
         self.cv_debug = False
 
         self.screen_x = 2560
@@ -53,10 +53,23 @@ class Threaded:
         self.head_toggle = True
 
         # Single shared memory buffer
-        self.frame_shm = shared_memory.SharedMemory(
+        # self.frame_shm = shared_memory.SharedMemory(
+        #     create=True, 
+        #     size=int(np.prod(self.shape))  # 1440*1440*3 = 6,220,800 bytes
+        # )
+        
+        self.frame_buffer = [
+            shared_memory.SharedMemory(
             create=True, 
-            size=int(np.prod(self.shape))  # 1440*1440*3 = 6,220,800 bytes
-        )
+            size=int(np.prod(self.shape))
+            ),
+            shared_memory.SharedMemory(
+            create=True, 
+            size=int(np.prod(self.shape))
+            )
+            
+        ]
+        self.frame_buffer_idx = Value(c_int,0)
         
         self.frame_shm_lock = Lock()
 
@@ -71,9 +84,13 @@ class Threaded:
         self.is_inference_ready.set()
         self.detection_count = Value(c_int,0)
         
-        
-
+        # import psutil
+        # p = psutil.Process()
+        # p.cpu_affinity([0, 1, 2])  # Dedicate cores
+        # p.nice(psutil.REALTIME_PRIORITY_CLASS)
         # self.y_bottom_deadzone = 200
+        # 1. Add atomic frame counter
+
 
     def main(self):
         processes = [
@@ -110,30 +127,32 @@ class Threaded:
         capture_frames = 0
         last_report = time.perf_counter()
         # self.is_inference_ready.set()
+        write_num = 0
+        
         while True:
-
-            self.is_inference_ready.wait(.09)
-
+            print(f"[CAP] WAITING {write_num} @ {time.perf_counter()}")
+            self.is_inference_ready.wait(.006)
             frame = camera.grab()
             if frame is None: 
-                time.sleep(.00005)
                 continue
-    
+            print(f"[CAP] CAPTURED {write_num} @ {time.perf_counter()}")
             with self.frame_shm_lock:
-                #using this way of copying frames can cause race conditions
-                # np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)[:] = frame  
-                shared_arr = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)
-                np.copyto(shared_arr,frame)
-
-
+                write_idx = self.frame_buffer_idx.value
+                shared_arr = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_buffer[write_idx].buf)
+                np.copyto(shared_arr, frame)
+                self.frame_buffer_idx.value = 1 - write_idx  # Toggle for next write
             self.is_sc_ready.set()
-            self.is_inference_ready.clear()#assuming its not gonna be ready 
+            print(f"[CAP] SENT {write_num} @ {time.perf_counter()}")
+            write_num+=1
             
-            capture_frames += 1
-            if time.perf_counter() - last_report >= 1.0:
-                print(f"Capture FPS: {capture_frames}")
-                capture_frames = 0
-                last_report = time.perf_counter()
+            self.is_inference_ready.clear()#clearing it so doesnt loop
+            
+            if self.fps_debug:
+                capture_frames += 1
+                if time.perf_counter() - last_report >= 1.0:
+                    print(f"Capture FPS: {capture_frames}")
+                    capture_frames = 0
+                    last_report = time.perf_counter()
                 
     def process_results(self, results, class_names):
 
@@ -149,49 +168,46 @@ class Threaded:
                 )
     @torch.inference_mode()
     def inference(self):
+        
+        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
 
-        # model = YOLO(os.path.join(os.getcwd(),'runs/train/EFPS_3000image_1440p_200epoch_batch3_11m/weights/best.engine'))
-        # model = YOLO(os.path.join(os.getcwd(),'runs/train/EFPS_3000image_1440p_200epoch_batch3_11m/weights/best.pt'))
-        model  = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.engine"))
-        # model  = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
-
-        stream = torch.cuda.Stream()
+        read_num = 0
         while True:
-            
+            print(f"[INF] WAITING {read_num} @ {time.perf_counter()}")
             self.is_sc_ready.wait()
 
-            
+                
             with self.frame_shm_lock:
-                
-                frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf)
-
+                read_idx = 1 - self.frame_buffer_idx.value  # Read from last completed buffer
                 
 
-            #would accessing the buffer "directly" cause weird memory issues??
-            # frame_copy = np.copy(frame_buffer)
+                curr_buffer = self.frame_buffer[read_idx].buf
+                frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=curr_buffer)
             
-            #if clear flag early then the aimbot will have older data but higher fps
             self.is_sc_ready.clear()
-            with torch.cuda.stream(stream):
-                tensor = (
-                    torch.as_tensor(frame_buffer, dtype = torch.uint8)
-                    .to(device = 'cuda', non_blocking= True)#non blocking arg might cause weird latency flicking thing?
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .div(255)
-                    .contiguous()
-                )
-                
-                results = model(source=tensor,
-                    imgsz=self.capture_dim,
-                    conf = .6,
-                    max_det=self.max_detections
-                )
+            print(f"[INF] GRABBED {read_num} @ {time.perf_counter()}")
+
+            tensor = (
+                torch.as_tensor(frame_buffer, dtype = torch.uint8)
+                .to(device = 'cuda')#non blocking arg might cause weird latency flicking thing?
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .div(255)
+                .contiguous()
+            )
+            torch.cuda.synchronize()  # Wait for GPU copy
+            results = model(source=tensor,
+                imgsz=self.capture_dim,
+                conf = .6,
+                max_det=self.max_detections
+            )
             #clearing flag later will result in more up to date data me thinks but lower fps
             
             
             self.process_results(results[0], model.names)
             
+            print(f"[INF] SEND RESULTS {read_num} @ {time.perf_counter()}")
+            read_num+=1
             self.is_inference_ready.set() 
             self.is_detections_ready.set()
 
@@ -207,8 +223,14 @@ class Threaded:
         while True:
             
             self.is_detections_ready.wait()
+
+            with self.frame_shm_lock:
+                read_idx = 1 - self.frame_buffer_idx.value  # Sync with inference
+            
             if self.cv_debug:
-                frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_shm.buf).copy()
+                curr_buffer = self.frame_buffer[read_idx].buf
+                frame = np.ndarray(self.shape, dtype=np.uint8, buffer=curr_buffer).copy()
+
 
                 
 
@@ -235,14 +257,15 @@ class Threaded:
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 1)
                 cv2.imshow("Screen Capture Detection", frame)
                 cv2.waitKey(1)
-            frame_count+=1
-            
-            current_time = time.perf_counter()
-            if self.fps_debug and current_time - last_fps_update >= 1:
-                fps = frame_count / (current_time - last_fps_update)
-                last_fps_update = current_time
-                frame_count = 0
-                print(f"Actual FPS: {fps:.1f}")
+
+            if self.fps_debug:
+                frame_count+=1
+                current_time = time.perf_counter()
+                if current_time - last_fps_update >= 1:
+                    fps = frame_count / (current_time - last_fps_update)
+                    last_fps_update = current_time
+                    frame_count = 0
+                    print(f"Actual FPS: {fps:.1f}")
     
     def select_target_bounding_box(self,detection) -> tuple[int, int]:
         HYSTERESIS_FACTOR = 1.25
@@ -297,7 +320,7 @@ class Threaded:
                  #aims 25% above center
                 height = y2 - y1
 
-                if height > 95:  # Big target
+                if height > 75:  # Big target
                     offset_percentage = 0.35
                 elif height > 35:  # Medium target
                     offset_percentage = 0.25

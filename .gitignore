@@ -14,3 +14,4 @@ train/datasets/
 train/pre_split_dataset/
 train/auto_annotation/data/
 __pycache__/
+.vscode/

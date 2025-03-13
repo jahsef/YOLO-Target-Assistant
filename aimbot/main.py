@@ -20,7 +20,7 @@ from aimbot.utils import TargetSelector
 
 
 class Main:
-     
+
     def main(self):     
         self.debug = False
         self.screen_x = 2560
@@ -87,10 +87,10 @@ class Main:
         
         # model  = YOLO(os.path.join(cwd,"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
         # model  = YOLO(os.path.join(cwd,"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.engine"))
-        # model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
-        model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/engine_fp16_896x1440/best.engine"))
+        model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
+        # model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/engine_fp16_896x1440/best.engine"))
 
-        # model = YOLO(os.path.join(cwd,'runs/train/EFPS_3000image_1440p_200epoch_batch3_11m/weights/best.engine'))
+        # model = YOLO(os.path.join(cwd,'runs/train/\EFPS_3000image_11m_1440p_batch3_epoch200/weights/best.pt'))
   
         
         if self.debug:
