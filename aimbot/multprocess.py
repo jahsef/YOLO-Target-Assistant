@@ -29,34 +29,35 @@ class Detection(Structure):
 
 class Threaded:
     def __init__(self):
-        self.fps_debug = False
+        self.fps_debug = True
         self.cv_debug = False
 
         self.screen_x = 2560
         self.screen_y = 1440
         self.capture_dim = (896,1440)#hxw
-        
-
         self.max_detections = 16
         self.screen_center_x = self.screen_x // 2
         self.screen_center_y = self.screen_y // 2
         self.x_offset = (self.screen_x - self.capture_dim[1])//2
         self.y_offset = (self.screen_y - self.capture_dim[0])//2
-        
         self.is_key_pressed = Value(c_bool, False)
         self.key_lock = Lock()
         
         self.shape = list(self.capture_dim)
         self.shape.append(3)# for *3 in np.prod(np.ndarray)
-        
         self.prev_center = None
         self.head_toggle = True
+        
 
-        # Single shared memory buffer
-        # self.frame_shm = shared_memory.SharedMemory(
-        #     create=True, 
-        #     size=int(np.prod(self.shape))  # 1440*1440*3 = 6,220,800 bytes
-        # )
+        
+
+        self.detections_shm = Array(Detection, self.max_detections, lock=False)
+        self.detection_lock = Lock()
+
+        self.is_detections_ready = Event()
+
+        self.detection_count = Value(c_int,0)
+        
         
         self.frame_buffer = [
             shared_memory.SharedMemory(
@@ -69,27 +70,9 @@ class Threaded:
             )
             
         ]
-        self.frame_buffer_idx = Value(c_int,0)
-        
-        self.frame_shm_lock = Lock()
+        self.buffer_ready = [Value(c_bool, False), Value(c_bool, False)]
+        self.current_write_idx = Value(c_int, 0)
 
-
-        # Detection shared memory
-        self.detections_shm = Array(Detection, self.max_detections, lock=False)
-        self.detection_lock = Lock()
-        
-        self.is_sc_ready = Event()
-        self.is_inference_ready = Event()
-        self.is_detections_ready = Event()
-        self.is_inference_ready.set()
-        self.detection_count = Value(c_int,0)
-        
-        # import psutil
-        # p = psutil.Process()
-        # p.cpu_affinity([0, 1, 2])  # Dedicate cores
-        # p.nice(psutil.REALTIME_PRIORITY_CLASS)
-        # self.y_bottom_deadzone = 200
-        # 1. Add atomic frame counter
 
 
     def main(self):
@@ -126,26 +109,26 @@ class Threaded:
         
         capture_frames = 0
         last_report = time.perf_counter()
-        # self.is_inference_ready.set()
         write_num = 0
         
         while True:
-            print(f"[CAP] WAITING {write_num} @ {time.perf_counter()}")
-            self.is_inference_ready.wait(.006)
+
+
+
             frame = camera.grab()
             if frame is None: 
+                # time.sleep(.0001)
                 continue
-            print(f"[CAP] CAPTURED {write_num} @ {time.perf_counter()}")
-            with self.frame_shm_lock:
-                write_idx = self.frame_buffer_idx.value
-                shared_arr = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_buffer[write_idx].buf)
-                np.copyto(shared_arr, frame)
-                self.frame_buffer_idx.value = 1 - write_idx  # Toggle for next write
-            self.is_sc_ready.set()
-            print(f"[CAP] SENT {write_num} @ {time.perf_counter()}")
-            write_num+=1
             
-            self.is_inference_ready.clear()#clearing it so doesnt loop
+            write_idx = self.current_write_idx.value
+            shared_arr = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_buffer[write_idx].buf)
+            np.copyto(shared_arr, frame)
+            with self.buffer_ready[write_idx].get_lock():
+                self.buffer_ready[write_idx].value = True  # Memory fence
+                self.current_write_idx.value = 1 - write_idx  # Toggle AFTER write
+
+            # print(f"[CAP] SENT {write_num} @ {time.perf_counter()}")
+            write_num+=1
             
             if self.fps_debug:
                 capture_frames += 1
@@ -167,48 +150,43 @@ class Threaded:
                     float(box.conf[0]), int(box.cls[0])
                 )
     @torch.inference_mode()
+    
     def inference(self):
-        
-        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
-
-        read_num = 0
-        while True:
-            print(f"[INF] WAITING {read_num} @ {time.perf_counter()}")
-            self.is_sc_ready.wait()
-
-                
-            with self.frame_shm_lock:
-                read_idx = 1 - self.frame_buffer_idx.value  # Read from last completed buffer
-                
-
-                curr_buffer = self.frame_buffer[read_idx].buf
-                frame_buffer = np.ndarray(self.shape, dtype=np.uint8, buffer=curr_buffer)
-            
-            self.is_sc_ready.clear()
-            print(f"[INF] GRABBED {read_num} @ {time.perf_counter()}")
-
-            tensor = (
-                torch.as_tensor(frame_buffer, dtype = torch.uint8)
+        def process_frame(frame):
+            return  (
+                torch.as_tensor(frame, dtype = torch.uint8)
                 .to(device = 'cuda')#non blocking arg might cause weird latency flicking thing?
                 .permute(2, 0, 1)
                 .unsqueeze(0)
                 .div(255)
                 .contiguous()
             )
-            torch.cuda.synchronize()  # Wait for GPU copy
+        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
+
+        read_num = 0
+        tensor = np.zeros((896,1440,3),dtype = np.uint8)
+        while True:
+            
+            read_idx = 1 - self.current_write_idx.value  # Opposite of current write
+            
+            with self.buffer_ready[read_idx].get_lock():
+                if self.buffer_ready[read_idx].value:
+                    frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_buffer[read_idx].buf)
+                    tensor = process_frame(frame)
+                    self.buffer_ready[read_idx].value = False  # Reset flag
+            
+            
             results = model(source=tensor,
                 imgsz=self.capture_dim,
                 conf = .6,
                 max_det=self.max_detections
             )
-            #clearing flag later will result in more up to date data me thinks but lower fps
-            
-            
+
             self.process_results(results[0], model.names)
             
-            print(f"[INF] SEND RESULTS {read_num} @ {time.perf_counter()}")
+            # print(f"[INF] SEND RESULTS {read_num} @ {time.perf_counter()}")
             read_num+=1
-            self.is_inference_ready.set() 
+
             self.is_detections_ready.set()
 
 
@@ -224,8 +202,7 @@ class Threaded:
             
             self.is_detections_ready.wait()
 
-            with self.frame_shm_lock:
-                read_idx = 1 - self.frame_buffer_idx.value  # Sync with inference
+            read_idx = 1 - self.current_write_idx.value 
             
             if self.cv_debug:
                 curr_buffer = self.frame_buffer[read_idx].buf
