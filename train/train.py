@@ -20,7 +20,7 @@ def main():
     # model = YOLO("yolo11m.pt")  # Use the YOLOv8 pre-trained weights or your own
     # model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
     # model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_11m_1440p_batch3_epoch200/weights/epoch115.pt"))
-    model = YOLO(os.path.join(cwd,r'runs\train\EFPS_4000img_11m_1440p_batch6_epoch200\weights\epoch45.pt'))
+    model = YOLO(os.path.join(cwd,r'runs\train\EFPS_4000img_11m_1440p_batch6_epoch200\weights\epoch20.pt'))
     # model = YOLO(os.path.join(cwd, "runs/train/EFPS_1863transferfrom1400_1440x1440_10epoch_batch6_11s/weights/best.pt"))
     # Train the model
     

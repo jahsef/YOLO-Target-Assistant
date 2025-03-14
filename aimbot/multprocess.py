@@ -12,10 +12,11 @@ import numpy as np
 from ctypes import Structure, c_int, c_float, c_bool, c_double
 import win32api
 import win32con
+import cupy as cp
 
 
 
-logging.getLogger('ultralytics').setLevel(logging.ERROR)
+
 
 class Detection(Structure):
     _fields_ = [
@@ -58,7 +59,6 @@ class Threaded:
 
         self.detection_count = Value(c_int,0)
         
-        
         self.frame_buffer = [
             shared_memory.SharedMemory(
             create=True, 
@@ -70,6 +70,7 @@ class Threaded:
             )
             
         ]
+        
         self.buffer_ready = [Value(c_bool, False), Value(c_bool, False)]
         self.current_write_idx = Value(c_int, 0)
 
@@ -96,8 +97,10 @@ class Threaded:
         except KeyboardInterrupt:
             print('Shutting down')
             for p in processes: p.terminate()
-            self.frame_shm.close()
-            self.frame_shm.unlink()
+            for buffer in self.frame_buffer: 
+                buffer.close()
+                buffer.unlink()
+            
 
     def screen_cap(self):
         camera = bettercam.create(
@@ -149,45 +152,53 @@ class Threaded:
                     xyxy[0], xyxy[1], xyxy[2], xyxy[3],
                     float(box.conf[0]), int(box.cls[0])
                 )
+            
     @torch.inference_mode()
-    
     def inference(self):
-        def process_frame(frame):
-            return  (
-                torch.as_tensor(frame, dtype = torch.uint8)
-                .to(device = 'cuda')#non blocking arg might cause weird latency flicking thing?
-                .permute(2, 0, 1)
-                .unsqueeze(0)
-                .div(255)
-                .contiguous()
-            )
-        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
+        def _process_frame(frame):
+            tensor = torch.from_numpy(frame).to(device='cuda', non_blocking=True)
+            tensor = tensor.permute(2, 0, 1).unsqueeze_(0).half().div_(255)
+            return tensor.contiguous()
+        
+        # def _process_frame(frame: cp.ndarray) -> torch.Tensor:
+        #     bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
+        #     float_frame = bchw.astype(cp.float16, copy=False)/255.0
+        #     return torch.as_tensor(float_frame, device='cuda')
+
+        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
 
         read_num = 0
+        
+        #if frame not ready yet wont explode
         tensor = np.zeros((896,1440,3),dtype = np.uint8)
+        
         while True:
             
+            # print(f"[INF] _TRY GRAB {read_num} @ {time.perf_counter()}")
             read_idx = 1 - self.current_write_idx.value  # Opposite of current write
             
             with self.buffer_ready[read_idx].get_lock():
                 if self.buffer_ready[read_idx].value:
                     frame = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_buffer[read_idx].buf)
-                    tensor = process_frame(frame)
+                    tensor = _process_frame(frame)
                     self.buffer_ready[read_idx].value = False  # Reset flag
+                    # print(f"[INF] SUCCESSFUL GRAB {read_num} @ {time.perf_counter()}")
             
-            
+            # print(f"[INF] INFERENCING {read_num} @ {time.perf_counter()}")
             results = model(source=tensor,
                 imgsz=self.capture_dim,
                 conf = .6,
-                max_det=self.max_detections
+                verbose = False
             )
 
             self.process_results(results[0], model.names)
             
-            # print(f"[INF] SEND RESULTS {read_num} @ {time.perf_counter()}")
-            read_num+=1
+            # print(f"[INF] DONE {read_num} @ {time.perf_counter()}")
+            
 
             self.is_detections_ready.set()
+            # print(f"[INF] SET {read_num} @ {time.perf_counter()}")
+            read_num+=1
 
 
     def aimbot_logic(self):

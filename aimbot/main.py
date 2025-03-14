@@ -61,7 +61,7 @@ class Main:
             
 
     
-    #only like a 5% speedup using cupy, need to look into that some more
+    #almost 25% speedup over np (preprocess + inference)
     #also python doesnt have method overloading by parameter type
     def preprocess(self,frame: cp.ndarray) -> torch.Tensor:
         bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
@@ -87,10 +87,11 @@ class Main:
         
         # model  = YOLO(os.path.join(cwd,"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
         # model  = YOLO(os.path.join(cwd,"runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.engine"))
-        model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))#dynamic engine size is POOP
-        # model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/engine_fp16_896x1440/best.engine"))
+        
+        model = YOLO(os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
+        
 
-        # model = YOLO(os.path.join(cwd,'runs/train/\EFPS_3000image_11m_1440p_batch3_epoch200/weights/best.pt'))
+        # model = YOLO(os.path.join(cwd,'runs/train/EFPS_4000img_11m_1440p_batch6_epoch200/weights/best.pt'))
   
         
         if self.debug:
