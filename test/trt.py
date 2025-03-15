@@ -1,73 +1,46 @@
-    
-import tensorrt as trt
+import numpy as np
+import os
 import pycuda.driver as cuda
 import pycuda.autoinit
-import numpy as np
+import tensorrt as trt
 
+import matplotlib.pyplot as plt
+from PIL import Image
+
+cwd = os.getcwd()
+
+# Filenames of TensorRT plan file and input/output images.
+engine_file = os.path.join(cwd,"runs//train//EFPS_4000img_11s_1440p_batch6_epoch200//weights//best_stripped.engine")
+input_file  = "input.ppm"
+output_file = "output.ppm"
+
+
+TRT_LOGGER = trt.Logger()
 # Load the TensorRT engine
 def load_engine(engine_file_path):
-    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    assert os.path.exists(engine_file_path)
+    print("Reading engine from file {}".format(engine_file_path))
     with open(engine_file_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
         engine = runtime.deserialize_cuda_engine(f.read())
     return engine
-
-# Allocate memory for inputs/outputs
-def allocate_buffers(engine, context):
-    inputs = {}
-    outputs = {}
-    for binding in engine:
-        # Get tensor shape
-        if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
-            shape = context.get_tensor_shape(binding)  # Get input shape from context
-        else:
-            shape = engine.get_tensor_shape(binding)  # Get output shape from engine
-        
-        # Calculate size
-        size = trt.volume(shape)
-        dtype = trt.nptype(engine.get_tensor_dtype(binding))
-        
-        # Allocate device memory
-        device_mem = cuda.mem_alloc(size * dtype.itemsize)
-        
-        # Assign to inputs or outputs
-        if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
-            inputs[binding] = device_mem
-        else:
-            outputs[binding] = device_mem
-
-    return inputs, outputs
-
     
-if __name__ == "__main__":
-    engine_file = "runs//train//train_run//weights//best_stripped.engine"  # Path to your .engine file
-    engine = load_engine(engine_file)
-    context = engine.create_execution_context()
+def preprocess(image):
+    # Mean normalization
+    mean = np.array([0.485, 0.456, 0.406]).astype('float32')
+    stddev = np.array([0.229, 0.224, 0.225]).astype('float32')
+    data = (np.asarray(image).astype('float32') / float(255.0) - mean) / stddev
+    # Switch from HWC to to CHW order
+    return np.moveaxis(data, 2, 0)
 
-    # Set input shape dynamically
-    input_shape = (1, 3, 1440, 1440)  # Example shape (adjust as needed)
-    context.set_input_shape("input_tensor_name", input_shape)
+def postprocess(data):
+    num_classes = 2
+    # create a color palette, selecting a color for each class
+    palette = np.array([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
+    colors = np.array([palette*i%255 for i in range(num_classes)]).astype("uint8")
+    # plot the segmentation predictions for 21 classes in different colors
+    img = Image.fromarray(data.astype('uint8'), mode='P')
+    img.putpalette(colors)
+    return img
 
-    # Allocate buffers
-    inputs, outputs = allocate_buffers(engine, context)
 
-    # Bind tensors to memory addresses
-    for name, ptr in inputs.items():
-        context.set_tensor_address(name, ptr)
-    for name, ptr in outputs.items():
-        context.set_tensor_address(name, ptr)
-
-    # Prepare input data
-    input_data = np.random.random(input_shape).astype(np.float16)  # Example input
-    cuda.memcpy_htod(inputs["input_tensor_name"], input_data.ravel())  # Copy input data to GPU
-
-    # Perform inference
-    context.execute_async_v2()  # Run inference asynchronously
-
-    # Retrieve output data
-    output_shape = context.get_tensor_shape("output_tensor_name")
-    output_size = trt.volume(output_shape)
-    output_dtype = trt.nptype(engine.get_tensor_dtype("output_tensor_name"))
-    host_output = np.empty(output_size, dtype=output_dtype)
-    cuda.memcpy_dtoh(host_output, outputs["output_tensor_name"])  # Copy output data to CPU
-
-    print("Output data:", host_output)
+engine = load_engine(engine_file)

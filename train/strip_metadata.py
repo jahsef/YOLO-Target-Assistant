@@ -16,5 +16,5 @@ def strip_metadata(input_file, output_file):
 
 # Example usage
 cwd = os.getcwd()
-engine_path = os.path.join(cwd,"runs//train//train_run//weights//best.engine")
-strip_metadata(engine_path, os.path.join(cwd,"runs//train//train_run//weights//best_stripped.engine"))
+engine_path = os.path.join(cwd,"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine")
+strip_metadata(engine_path, os.path.join(cwd,"runs//train//EFPS_4000img_11s_1440p_batch6_epoch200//weights//best_stripped.engine"))

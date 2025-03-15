@@ -62,6 +62,7 @@ class Fart:
         )
         while True:
             camera.grab()
+        
     def main(self):
         
         self.screen_x = 2560

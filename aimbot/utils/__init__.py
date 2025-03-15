@@ -1,1 +1,1 @@
-from .targetselector import TargetSelector
+from . import targetselector

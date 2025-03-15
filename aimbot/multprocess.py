@@ -14,11 +14,7 @@ import win32api
 import win32con
 import cupy as cp
 
-
-
-
-
-class Detection(Structure):
+class Detection(Structure):#would this take more resources than object serialization?
     _fields_ = [
         ('x1', c_int),
         ('y1', c_int),
@@ -50,9 +46,7 @@ class Threaded:
         self.head_toggle = True
         
 
-        
-
-        self.detections_shm = Array(Detection, self.max_detections, lock=False)
+        self.detections_shm = Array(Detection, self.max_detections, lock=True)
         self.detection_lock = Lock()
 
         self.is_detections_ready = Event()
@@ -68,9 +62,7 @@ class Threaded:
             create=True, 
             size=int(np.prod(self.shape))
             )
-            
         ]
-        
         self.buffer_ready = [Value(c_bool, False), Value(c_bool, False)]
         self.current_write_idx = Value(c_int, 0)
 
@@ -109,27 +101,21 @@ class Threaded:
             output_color="BGR",
             max_buffer_len=2
         )
-        
         capture_frames = 0
         last_report = time.perf_counter()
         write_num = 0
         
         while True:
-
-
-
             frame = camera.grab()
             if frame is None: 
                 # time.sleep(.0001)
                 continue
-            
             write_idx = self.current_write_idx.value
             shared_arr = np.ndarray(self.shape, dtype=np.uint8, buffer=self.frame_buffer[write_idx].buf)
             np.copyto(shared_arr, frame)
             with self.buffer_ready[write_idx].get_lock():
-                self.buffer_ready[write_idx].value = True  # Memory fence
-                self.current_write_idx.value = 1 - write_idx  # Toggle AFTER write
-
+                self.buffer_ready[write_idx].value = True
+                self.current_write_idx.value = 1 - write_idx
             # print(f"[CAP] SENT {write_num} @ {time.perf_counter()}")
             write_num+=1
             
