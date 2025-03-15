@@ -19,15 +19,14 @@ class TargetSelector:
         self.prev_center = None
 
         
-    def get_target(self,detections) -> tuple[int, int]:
+    def get_target(self,detections: dict) -> tuple[int, int]:
         # Track best candidate
         best_enemy = (None, -1)  # (center, score)
-        for detection in detections:
-            if detection['class_name'] != 'Enemy':  # Only process Enemy class
-                continue
-
+        keys = list(detections.keys())
+        for uid in keys:
+            detection = detections[uid]
             # Calculate bounding box properties
-            x1, y1, x2, y2 = detection['bbox']
+            x1, y1, x2, y2 = detection['x1'],detection['y1'],detection['x2'],detection['y2']
             # if y1 >= self.screen_y - self.y_bottom_deadzone:
             #     continue
             width, height = x2 - x1, y2 - y1

@@ -1,4 +1,5 @@
 from ultralytics import YOLO
+from ultralytics.trackers.byte_tracker import BYTETracker
 import cv2
 import threading
 import time
@@ -16,12 +17,12 @@ sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
 # can replace with bettercam just no cupy support
 import betterercam
 # print(betterercam.__file__)
-from utils import targetselector,pevtracker
+from utils import targetselector
 
 
 class Main:
     def __init__(self):
-        self.debug = True
+        self.debug = False
         self.screen_x = 2560
         self.screen_y = 1440
         self.h_w_capture = (896,1440)#height,width
@@ -33,13 +34,14 @@ class Main:
         self.y_offset = (self.screen_y - self.h_w_capture[0])//2
         head_toggle = True
         self.target_selector = targetselector.TargetSelector(hysteresis= 1.5, proximity_threshold_sq= 75**2, screen_center=self.screen_center, x_offset=self.x_offset, y_offset= self.y_offset, head_toggle= head_toggle)
-        self.tracker = pevtracker.PevTracker()
+
+        self.tracker = BYTETracker(frame_rate=30)
     def main(self):     
         threading.Thread(target=self.input_detection, daemon=True).start()
         self.run_screen_capture_detection()
 
     def aimbot(self):  
-        target_bb = self.target_selector.get_target(self.detections)
+        target_bb = self.target_selector.get_target(self.tracker.detections)
         self.move_mouse_to_bounding_box(target_bb)
                 
     def move_mouse_to_bounding_box(self, detection):
@@ -113,19 +115,16 @@ class Main:
                     "confidence": float(box.conf[0])
                 }
                 self.detections.append(detection)
-            
+                
+            frame_bounding_boxes = []
+            for box in results[0].boxes:
+                if box.cls == 0:
+                    frame_bounding_boxes.append(tuple(map(int, box.xyxy[0])))
+            self.tracker.update_detections(frame_bounding_boxes)
             if self.debug:
-
-                frame_bounding_boxes = []
-                for box in results[0].boxes:
-                    if box.cls == 0:
-                        frame_bounding_boxes.append(tuple(map(int, box.xyxy[0])))
-                    
-                self.tracker.update_detections(frame_bounding_boxes)
-                
                 display_frame = cp.asnumpy(frame)
-                
-                for uid in list(self.tracker.detections):
+                keys = list(self.tracker.detections.keys())
+                for uid in keys:
                     detection = self.tracker.detections[uid]
                     x1,y1,x2,y2 = detection['x1'],detection['y1'],detection['x2'],detection['y2']
 
@@ -139,7 +138,7 @@ class Main:
                 cv2.imshow("Screen Capture Detection", display_frame)
                 cv2.waitKey(1)
                 
-            if(self.is_key_pressed and self.detections):
+            if(self.is_key_pressed and self.tracker.detections):
                 self.aimbot()
             self.detections.clear()
             frame_count+=1

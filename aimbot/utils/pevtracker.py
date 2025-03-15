@@ -28,7 +28,14 @@ class PevTracker:
         self._associate_detections(frame_bounding_boxes)
         
         self._iterate_last_detection()
-        
+    
+    def _predict_new_position():
+        pass
+    
+    def get_detections_in_motion():
+        pass
+    
+    
     def _associate_detections(self,frame_bounding_boxes):
         #tries to map a bounding box to a uid
         #maybe the center and h/w is within a certain threshold?
@@ -37,7 +44,8 @@ class PevTracker:
             # n^2 complexity probably not good but prolly have max like 5 detections
             x1,y1,x2,y2 = bounding_box[0],bounding_box[1],bounding_box[2],bounding_box[3]
             
-            new_center = (x2 - x1, y2 - y1)
+            new_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+
             
             keys = list(self.detections.keys())
             has_been_associated = False
@@ -48,7 +56,7 @@ class PevTracker:
                     
                     continue
                 curr_uid_bb = (self.detections[uid]['x1'],self.detections[uid]['y1'],self.detections[uid]['x2'],self.detections[uid]['y2'])
-                curr_uid_center = (curr_uid_bb[2] - curr_uid_bb[0], curr_uid_bb[3] - curr_uid_bb[1])
+                curr_uid_center = ((curr_uid_bb[0] + curr_uid_bb[2]) // 2, (curr_uid_bb[1] + curr_uid_bb[3]) // 2)
                 
                 delta_x = curr_uid_center[0] - new_center[0]
                 delta_y = curr_uid_center[1] - new_center[1]
@@ -77,7 +85,7 @@ class PevTracker:
             'y1': y1,
             'x2': x2,
             'y2': y2,
-            'motion_vector': None,#should i do none or 0,0?
+            'motion_vector': (0,0),#should i do none or 0,0?
             'last_detection': 0
         }
         self.uid +=1
