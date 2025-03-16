@@ -22,11 +22,10 @@ class TargetSelector:
     def get_target(self,detections: dict) -> tuple[int, int]:
         # Track best candidate
         best_enemy = (None, -1)  # (center, score)
-        keys = list(detections.keys())
-        for uid in keys:
-            detection = detections[uid]
+        for detection in detections:
+
             # Calculate bounding box properties
-            x1, y1, x2, y2 = detection['x1'],detection['y1'],detection['x2'],detection['y2']
+            x1, y1, x2, y2 = detection[:4]
             # if y1 >= self.screen_y - self.y_bottom_deadzone:
             #     continue
             width, height = x2 - x1, y2 - y1

@@ -1,5 +1,7 @@
 from ultralytics import YOLO
 from ultralytics.trackers.byte_tracker import BYTETracker
+from ultralytics.engine.results import Boxes
+
 import cv2
 import threading
 import time
@@ -18,6 +20,7 @@ sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
 import betterercam
 # print(betterercam.__file__)
 from utils import targetselector
+from argparse import Namespace  
 
 
 class Main:
@@ -34,14 +37,17 @@ class Main:
         self.y_offset = (self.screen_y - self.h_w_capture[0])//2
         head_toggle = True
         self.target_selector = targetselector.TargetSelector(hysteresis= 1.5, proximity_threshold_sq= 75**2, screen_center=self.screen_center, x_offset=self.x_offset, y_offset= self.y_offset, head_toggle= head_toggle)
-
-        self.tracker = BYTETracker(frame_rate=30)
+        
+        args = Namespace(track_high_thresh = .7, track_low_thresh = .4,track_buffer=30, fuse_score = .5, match_thresh = .6,new_track_thresh=0.6)
+        #threshold is for conf, buffer is how long to wait before drop detection, fuse score to fuse detections, lower is aggressive, high is conservative, match thresh matching detections between frames with iou
+        self.tracker = BYTETracker(args,frame_rate=60)
+        
     def main(self):     
         threading.Thread(target=self.input_detection, daemon=True).start()
         self.run_screen_capture_detection()
 
-    def aimbot(self):  
-        target_bb = self.target_selector.get_target(self.tracker.detections)
+    def aimbot(self, detections):  
+        target_bb = self.target_selector.get_target(detections)
         self.move_mouse_to_bounding_box(target_bb)
                 
     def move_mouse_to_bounding_box(self, detection):
@@ -108,38 +114,42 @@ class Main:
                 imgsz=self.h_w_capture,
                 verbose = False
             )
-            for box in results[0].boxes:
-                detection = {
-                    "class_name": model.names[int(box.cls[0])],
-                    "bbox": list(map(int, box.xyxy[0])),
-                    "confidence": float(box.conf[0])
-                }
-                self.detections.append(detection)
-                
-            frame_bounding_boxes = []
-            for box in results[0].boxes:
-                if box.cls == 0:
-                    frame_bounding_boxes.append(tuple(map(int, box.xyxy[0])))
-            self.tracker.update_detections(frame_bounding_boxes)
+
+            if results[0].boxes.data.numel() == 0:  # No detections
+                # print("No detections found in this frame.")
+                enemy_boxes = Boxes(
+                    boxes=torch.empty((0, 6), device="cuda:0"),  # Empty tensor with shape (0, 6)
+                    orig_shape=results[0].boxes.orig_shape
+                )
+            else:
+                # Filter for enemies (cls == 0)
+                cls_target = 0
+                enemy_mask = results[0].boxes.cls == cls_target
+
+                # Extract filtered data
+                filtered_data = results[0].boxes.data[enemy_mask]  # Filter the 'data' attribute
+
+                # Create a new Boxes object
+                enemy_boxes = Boxes(
+                    boxes=filtered_data,  # Pass the filtered 'data' tensor
+                    orig_shape=results[0].boxes.orig_shape
+                )
+
+            tracked_objects = self.tracker.update(enemy_boxes.cpu().numpy())
+            
             if self.debug:
                 display_frame = cp.asnumpy(frame)
-                keys = list(self.tracker.detections.keys())
-                for uid in keys:
-                    detection = self.tracker.detections[uid]
-                    x1,y1,x2,y2 = detection['x1'],detection['y1'],detection['x2'],detection['y2']
+                for i in range(len(tracked_objects)):
+                    x1, y1, x2, y2, = map(int,tracked_objects[i][:4])
+                    # print(tracked_objects[i])
 
                     cv2.rectangle(display_frame, (x1, y1), (x2, y2), (200, 25, 225), thickness = 2)
-                
-                # for obj in self.detections:
-                #     x1, y1, x2, y2 = obj['bbox']
-                #     label = f"{obj['class_name']} {obj['confidence']:.2f}"
-                #     cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), thickness = 1)
-                #     cv2.putText(display_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), thickness = 1)
+                    # cv2.putText(display_frame, f"ID: {track_id}", (int(x1), int(y1) - 10),cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
                 cv2.imshow("Screen Capture Detection", display_frame)
                 cv2.waitKey(1)
                 
-            if(self.is_key_pressed and self.tracker.detections):
-                self.aimbot()
+            if(self.is_key_pressed and len(tracked_objects) > 0):
+                self.aimbot(tracked_objects)
             self.detections.clear()
             frame_count+=1
             current_time = time.perf_counter()
