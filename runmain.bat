@@ -1,1 +1,1 @@
-python -m aimbot.main
+python "aimbot/main.py"

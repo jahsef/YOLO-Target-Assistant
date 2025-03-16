@@ -18,6 +18,7 @@ import betterercam
 print(betterercam.__file__)
 
 torch.cuda.empty_cache()
+
 cwd = os.getcwd()
 img_path = os.path.join(cwd, 'train/datasets/EFPS_4000img/images/train/frame_0(1)_1.jpg')
 
@@ -31,7 +32,7 @@ def preprocess(frame: cp.ndarray) -> torch.Tensor:
     float_frame *= 1.0 / 255.0  # Faster than division
     return torch.as_tensor(float_frame, device='cuda')
 
-model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
+model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
 img_tensor = preprocess(cp_img)
 for _ in range(16):
     with torch.no_grad():
@@ -39,24 +40,21 @@ for _ in range(16):
 
 print('Starting FPS test')
 
-class YoloJit(jit.ScriptModule):
-    def __init__(self):
-        super().__init__()
-        self.model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
 
 
-    @jit.script_method
-    @torch.inference_mode()
-    def inference(self,frame,imgsz):
-        return self.model.predict(
-            source = frame,
-            conf = .6,
-            verbose = False,
-            imgsz = imgsz
-        )
+
+@torch.inference_mode()
+
+def inference(frame,imgsz):
+    return model.predict(
+        source = frame,
+        conf = .6,
+        verbose = False,
+        imgsz = imgsz
+    )
 start = time.perf_counter()
-me_object = YoloJit()
-me_object.inference(frame = cp_img,imgsz= (896,1440))
+for _ in range(1000):
+    inference(frame = preprocess(cp_img),imgsz= (896,1440))
 
 inference_time = time.perf_counter() - start
 
