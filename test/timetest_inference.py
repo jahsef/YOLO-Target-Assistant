@@ -50,7 +50,7 @@ print(type(processed_np_img))
 print(processed_np_img.shape)
 for _ in range(32):
     with torch.no_grad():
-        _ = model(processed_np_img,imgsz = imgsz, verbose = True)
+        _ = model(img_tensor,imgsz = imgsz, verbose = True)
 
 print('Starting FPS test')
 @torch.inference_mode()
