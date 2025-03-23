@@ -11,17 +11,13 @@ def main():
     cwd = os.getcwd()
     data_yaml_path = os.path.join(cwd,'train//datasets/EFPS_4000img//data.yaml')  # Update with your data.yaml path
 
-    epochs = 200  # Adjust the number of epochs as needed
-    batch = 3  # Adjust based on your GPU memory
-    nbs = 12 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
+    epochs = 100  # Adjust the number of epochs as needed
+    batch = 11  # Adjust based on your GPU memory
+    nbs = 33 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
     imgsz = 1440  # Image size for training
-
     # Load the YOLOv8 model (pretrained or custom)
-    model = YOLO("yolo11m.pt")  # Use the YOLOv8 pre-trained weights or your own
-    # model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
-    # model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_3000image_11m_1440p_batch3_epoch200/weights/epoch115.pt"))
-    # model = YOLO(os.path.join(cwd,r'runs\train\EFPS_4000img_11m_1440p_batch6_epoch200\weights\epoch20.pt'))
-    # model = YOLO(os.path.join(cwd, "runs/train/EFPS_1863transferfrom1400_1440x1440_10epoch_batch6_11s/weights/best.pt"))
+    model = YOLO("yolo11n.pt")  # Use the YOLOv8 pre-trained weights or your own
+    # model = YOLO(os.path.join(cwd,r'runs\train\EFPS_4000img_11s_retrain_1440p_batch6_epoch200\weights\epoch55.pt'))
     # Train the model
     
     model.train(
@@ -32,10 +28,10 @@ def main():
         project='runs/train',  # Directory to save the tra  ining results
         resume = False,
         device = 0,
-        name='EFPS_4000img_11m_1440p_batch3_epoch200',  # Directory name for the run
+        name='EFPS_4000img_11n_1440p_batch11_epoch100',  # Directory name for the run
         exist_ok=True,  # Overwrite the existing directory if necessary
         cache = 'disk',#takes in bool or string ig what
-        patience = 20,#0 = no early stopping
+        patience = 16,#0 = no early stopping
         rect = False, #may need to experiment with this, default False
         save_period = 5,#save every 10 epochs
         fraction = 1,#fraction of train

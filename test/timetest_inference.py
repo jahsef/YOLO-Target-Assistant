@@ -15,7 +15,7 @@ github_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
 
 import betterercam
-print(betterercam.__file__)
+# print(betterercam.__file__)
 
 torch.cuda.empty_cache()
 
@@ -32,7 +32,8 @@ def preprocess(frame: cp.ndarray) -> torch.Tensor:
     float_frame *= 1.0 / 255.0  # Faster than division
     return torch.as_tensor(float_frame, device='cuda')
 
-model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
+# model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
+model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/best.engine"))
 img_tensor = preprocess(cp_img)
 for _ in range(16):
     with torch.no_grad():
@@ -52,11 +53,19 @@ def inference(frame,imgsz):
         verbose = False,
         imgsz = imgsz
     )
-start = time.perf_counter()
-for _ in range(1000):
-    inference(frame = preprocess(cp_img),imgsz= (896,1440))
+poo_start = time.perf_counter()
+for i in range(64):
+    print(f'\niteration: {i}')
+    start = time.perf_counter()
+    for _ in range(1000):
+        inference(frame = img_tensor,imgsz= (896,1440))#preprocess(cp_img)
 
-inference_time = time.perf_counter() - start
+    inference_time = time.perf_counter() - start
 
-print(f"Inference time: {inference_time:.4f} sec")
-print(f"FPS: {(1000)/inference_time:.2f}")
+    print(f"Inference time: {inference_time:.4f} sec")
+    print(f"FPS: {(1000)/inference_time:.2f}")
+
+avg = time.perf_counter() - poo_start
+
+print(f" time: {avg:.4f} sec")
+print(f"avg FPS: {(64*1000)/avg:.2f}")

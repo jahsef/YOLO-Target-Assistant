@@ -38,7 +38,7 @@ def clear_directory(directory):
 clear_directory(labels_path)
 
 # Load the trained model
-model = YOLO(os.path.join(cwd, "runs/train/EFPS_3000image_realtrain_1440x1440_100epoch_batch6_11s/weights/best.pt"))
+model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/best.pt"))
 def preprocess(frame: cp.ndarray) -> torch.Tensor:
     bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
     float_frame = bchw.astype(cp.float16, copy=False)/255.0
@@ -69,7 +69,7 @@ def write_annotations(results, img_path):
 
     # Handle background images
     if len(boxes) == 0:  # No detections
-        if np.random.rand() > 0.13:  # Keep 15% of background images
+        if np.random.rand() > 0.2:  # Keep 15% of background images
             os.remove(img_path)
             logging.info(f"Deleted background image: {img_path}")
         return
@@ -88,7 +88,7 @@ def write_annotations(results, img_path):
             return
 
     if any(box.cls[0] == 'Enemy' for box in boxes):  #removes only high confidence enemy detections
-        if all(box.conf[0] > 0.9 for box in boxes if box.cls[0] == 'Enemy'):
+        if all(box.conf[0] > 0.85 for box in boxes if box.cls[0] == 'Enemy'):
             os.remove(img_path)
             logging.info(f"Removed high-confidence enemy image: {img_path}")
             return

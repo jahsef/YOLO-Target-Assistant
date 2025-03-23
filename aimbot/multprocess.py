@@ -151,8 +151,9 @@ class Threaded:
         #     float_frame = bchw.astype(cp.float16, copy=False)/255.0
         #     return torch.as_tensor(float_frame, device='cuda')
 
-        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
-
+        # model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
+        # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/best.engine"))
+        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/best.engine"))
         read_num = 0
         
         #if frame not ready yet wont explode

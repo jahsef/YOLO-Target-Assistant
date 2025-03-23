@@ -30,7 +30,7 @@ def crop(image_list):
         cv2.imwrite(os.path.join(cropped_dir,image_name), image)
 
 if __name__ == '__main__':
-    n_processes = 8
+    n_processes = 16
     for i in range(n_processes):
         curr_images_list = images_list[i::n_processes]
         print(len(curr_images_list))
