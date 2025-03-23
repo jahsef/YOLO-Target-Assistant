@@ -7,7 +7,7 @@ class TargetSelector:
                  x_offset : int,
                  y_offset: int,
                  head_toggle : bool,
-                 target_dimensions: tuple[int,int]
+                 target_dimensions
                  ):
         self.screen_center = screen_center
         self.x_offset = x_offset#offset needed because capture dim could be lower than real screen dim

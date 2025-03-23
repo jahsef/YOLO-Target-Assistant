@@ -19,11 +19,18 @@ import betterercam
 
 torch.cuda.empty_cache()
 
-cwd = os.getcwd()
-img_path = os.path.join(cwd, 'train/datasets/EFPS_4000img/images/train/frame_0(1)_1.jpg')
 
+
+# model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
+cwd = os.getcwd()
+base_dir = "runs/train/EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights"
+engine_name = "896x1440.engine"
+imgsz = (896,1440)
+model = ultralytics.YOLO(os.path.join(cwd,base_dir,engine_name))
+
+img_path = os.path.join(cwd, 'train/datasets/EFPS_4000img/images/train/frame_1012(1013).jpg')
 img = cv2.imread(img_path)
-img = cv2.resize(img, (1440, 896))  # Resize to model input size
+img = cv2.resize(img, imgsz[::-1])  # Resize to model input size
 cp_img = cp.ascontiguousarray(cp.asarray(img))
 
 def preprocess(frame: cp.ndarray) -> torch.Tensor:
@@ -31,34 +38,35 @@ def preprocess(frame: cp.ndarray) -> torch.Tensor:
     float_frame = bchw.astype(cp.float16, copy=False)
     float_frame *= 1.0 / 255.0  # Faster than division
     return torch.as_tensor(float_frame, device='cuda')
-
-# model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
-model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/best.engine"))
 img_tensor = preprocess(cp_img)
-for _ in range(16):
+
+
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+img = img.transpose(2, 0, 1) # HWC to CHW
+img = np.expand_dims(img, axis=0).astype(np.float32)#add batch dim
+img /= 255.0
+processed_np_img = np.ascontiguousarray(img)
+print(type(processed_np_img))
+print(processed_np_img.shape)
+for _ in range(32):
     with torch.no_grad():
-        _ = model(img_tensor,imgsz = (896,1440), verbose = False)
+        _ = model(processed_np_img,imgsz = imgsz, verbose = True)
 
 print('Starting FPS test')
-
-
-
-
 @torch.inference_mode()
-
 def inference(frame,imgsz):
-    return model.predict(
+    return model(
         source = frame,
         conf = .6,
         verbose = False,
         imgsz = imgsz
     )
 poo_start = time.perf_counter()
-for i in range(64):
+for i in range(16):
     print(f'\niteration: {i}')
     start = time.perf_counter()
     for _ in range(1000):
-        inference(frame = img_tensor,imgsz= (896,1440))#preprocess(cp_img)
+        inference(frame = img_tensor,imgsz= imgsz)#preprocess(cp_img)
 
     inference_time = time.perf_counter() - start
 
@@ -68,4 +76,4 @@ for i in range(64):
 avg = time.perf_counter() - poo_start
 
 print(f" time: {avg:.4f} sec")
-print(f"avg FPS: {(64*1000)/avg:.2f}")
+print(f"avg FPS: {(16*1000)/avg:.2f}")

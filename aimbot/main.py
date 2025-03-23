@@ -19,7 +19,7 @@ sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
 # can replace with bettercam just no cupy support
 import betterercam
 # print(betterercam.__file__)
-from utils import targetselector
+from utils import targetselector, mousemover
 from argparse import Namespace  
 
 
@@ -28,14 +28,15 @@ class Main:
         self.debug = False
         self.screen_x = 2560
         self.screen_y = 1440
-        self.h_w_capture = (896,1440)#height,width
+        self.h_w_capture = (320,320)#height,width
         self.is_key_pressed = False
         self.screen_center = (self.screen_x // 2,self.screen_y // 2)
         self.x_offset = (self.screen_x - self.h_w_capture[1])//2
         self.y_offset = (self.screen_y - self.h_w_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.target_dimensions = (32,32)#how far awway from crosshair to target 
+        self.target_dimensions = self.h_w_capture#tracvking windoww
+        
         
         self.setup_tracking()
         self.setup_targeting()
@@ -45,12 +46,14 @@ class Main:
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
         # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
-        self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/best.engine"))
-        # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/best.engine"))
+        # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/896x1440.engine"))
+        # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/320x320.engine"))
+        self.model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/320x320.engine"))
         
         self.empty_boxes = Boxes(boxes=torch.empty((0, 6), device=torch.device('cuda')),orig_shape=self.h_w_capture)
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
         self.camera = betterercam.create(region = capture_region, output_color='BGR',max_buffer_len=2, nvidia_gpu = True)#yolo does bgr -> rgb conversion in model.predict automatically
+        self.mouse_mover = mousemover.MouseMover()
         
     def main(self):     
         threading.Thread(target=self.input_detection, daemon=True).start()
@@ -118,6 +121,8 @@ class Main:
         # print(type(deltas))
         if deltas:#if valid target
             self.move_mouse_to_bounding_box(deltas)
+            # threading.Thread(target = self.mouse_mover.async_smooth_linear_move_mouse, args = (deltas, ), daemon= True).start()
+            
                 
     def move_mouse_to_bounding_box(self, deltas):
         #detection is (dx,dy)
