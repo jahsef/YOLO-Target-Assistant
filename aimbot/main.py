@@ -19,16 +19,20 @@ sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
 # can replace with bettercam just no cupy support
 import betterercam
 # print(betterercam.__file__)
-from utils import targetselector, mousemover
+from utils import targetselector, mousemover, tensorrt_engine
 from argparse import Namespace  
-
+# import pycuda.autoinit#auto init cuda mem context
 
 class Main:
     def __init__(self):
         self.debug = False
         self.screen_x = 2560
         self.screen_y = 1440
-        self.h_w_capture = (320,320)#height,width
+        self.h_w_capture = (896,1440)#height,width
+        base_dir = "runs/train/EFPS_4000img_11s_retrain_1440p_batch6_epoch200\weights"
+        engine_name = "896x1440_stripped.engine"
+        model_path = os.path.join(os.getcwd(), base_dir, engine_name)
+        self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, imgsz= self.h_w_capture, conf_threshold= .25)
         self.is_key_pressed = False
         self.screen_center = (self.screen_x // 2,self.screen_y // 2)
         self.x_offset = (self.screen_x - self.h_w_capture[1])//2
@@ -48,12 +52,15 @@ class Main:
         # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
         # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/896x1440.engine"))
         # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/320x320.engine"))
-        self.model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/320x320.engine"))
+        # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/320x320.engine"))
+        
+
         
         self.empty_boxes = Boxes(boxes=torch.empty((0, 6), device=torch.device('cuda')),orig_shape=self.h_w_capture)
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
         self.camera = betterercam.create(region = capture_region, output_color='BGR',max_buffer_len=2, nvidia_gpu = True)#yolo does bgr -> rgb conversion in model.predict automatically
-        self.mouse_mover = mousemover.MouseMover()
+        # might have to change bgr -> rgb for tensorrt native api
+        
         
     def main(self):     
         threading.Thread(target=self.input_detection, daemon=True).start()
@@ -65,13 +72,16 @@ class Main:
                 if frame is None:
                     continue
                 
-                torch_tensor = self.preprocess(frame)
-                self.inference(torch_tensor)
+                processed_frame = self.preprocess(frame)
+                self.inference(processed_frame)
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_objects = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
                 
                 if self.debug:
-                    self.debug_render(cp.asnumpy(frame),tracked_objects)
+                    # print(type(frame))
+                    # print(frame.shape)
+                    display_frame = cp.asnumpy(frame)
+                    self.debug_render(display_frame)
                 if self.is_key_pressed and len(tracked_objects) > 0:
                     self.aimbot(tracked_objects)
                 self.fps_tracker.update()
@@ -121,7 +131,7 @@ class Main:
         # print(type(deltas))
         if deltas:#if valid target
             self.move_mouse_to_bounding_box(deltas)
-            # threading.Thread(target = self.mouse_mover.async_smooth_linear_move_mouse, args = (deltas, ), daemon= True).start()
+
             
                 
     def move_mouse_to_bounding_box(self, deltas):
@@ -142,40 +152,87 @@ class Main:
         keyboard.on_press(on_key_press)
         while True:
             time.sleep(.1)
-    
+            
+    def parse_results_into_boxes(self,results: torch.Tensor, orig_shape: tuple, cls_target: int = 0):
+
+        # Check if results are empty
+        if len(results) == 0:
+            return Boxes(boxes=torch.empty((0, 6)), orig_shape=orig_shape)
+
+        # Filter results by class ID
+        cls_mask = results[:, 5] == cls_target  # Create mask for cls_target
+        filtered_results = results[cls_mask]   # Apply mask to filter results
+
+        # If no boxes match the target class, return empty Boxes object
+        if len(filtered_results) == 0:
+            return self.empty_boxes
+
+        # Construct Boxes object
+        boxes = Boxes(
+            boxes=filtered_results,  # Filtered results [x1, y1, x2, y2, conf, cls_id]
+            orig_shape=orig_shape    # Original image dimensions (height, width)
+        )
+
+        return boxes 
     #almost 25% speedup over np (preprocess + inference)
     #also python doesnt have method overloading by parameter type
-    def preprocess(self,frame: cp.ndarray) -> torch.Tensor:
+    def preprocess(self,frame: cp.ndarray):
         bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
-        float_frame = bchw.astype(cp.float16, copy=False)
+        float_frame = bchw.astype(cp.float32, copy=False)
         float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-        return torch.as_tensor(float_frame, device='cuda')
 
-    @torch.inference_mode()
+        return cp.ascontiguousarray(float_frame)
+        # return torch.as_tensor(float_frame, device='cuda')
+    
     def inference(self,source):
         
-        results = self.model(source=source,
-            conf = .25,
-            imgsz=self.h_w_capture,
-            verbose = False
-        )#could immediately pass this stuff to another thread/process but might add some latency
+        results = self.model.inference_cp(input_data = source)
+
         
-        if results[0].boxes.data.numel() == 0: 
-            enemy_boxes = self.empty_boxes
-        else:
-            cls_target = 0
-            enemy_mask = results[0].boxes.cls == cls_target
-            filtered_data = results[0].boxes.data[enemy_mask]  # Filter the 'data' attribute
-            enemy_boxes = Boxes(
-                boxes=filtered_data,  # Pass the filtered 'data' tensor
-                orig_shape=self.h_w_capture
-            )
-        #STrack .update
-        # coords = self.xyxy if self.angle is None else self.xywha
-        # return coords.tolist() + [self.track_id, self.score, self.cls, self.idx]
-        #STrack object results (byte tracker list[STrack])
-        #returns nparray of strack results
-        return self.tracker.update(enemy_boxes.cpu().numpy())
+        results = torch.as_tensor(results)
+        #need to parse results into the correct data structure boxes
+        # print(results)
+        # print(type(results))
+        results = self.parse_results_into_boxes(results, self.h_w_capture, cls_target= 0)
+
+        # else:
+        #     cls_target = 0
+        #     enemy_mask = results[0].boxes.cls == cls_target
+        #     filtered_data = results[0].boxes.data[enemy_mask]  # Filter the 'data' attribute
+        #     enemy_boxes = Boxes(
+        #         boxes=filtered_data,  # Pass the filtered 'data' tensor
+        #         orig_shape=self.h_w_capture
+        #     )
+        
+        return self.tracker.update(results.cpu().numpy())
+
+        
+    # @torch.inference_mode()
+    # def inference(self,source):
+        
+    #     results = self.model(source=source,
+    #         conf = .25,
+    #         imgsz=self.h_w_capture,
+    #         verbose = False
+    #     )#could immediately pass this stuff to another thread/process but might add some latency
+        
+    #     if results[0].boxes.data.numel() == 0: 
+    #         enemy_boxes = self.empty_boxes
+    #     else:
+    #         cls_target = 0
+    #         enemy_mask = results[0].boxes.cls == cls_target
+    #         filtered_data = results[0].boxes.data[enemy_mask]  # Filter the 'data' attribute
+    #         enemy_boxes = Boxes(
+    #             boxes=filtered_data,  # Pass the filtered 'data' tensor
+    #             orig_shape=self.h_w_capture
+    #         )
+    #     #STrack .update
+    #     # coords = self.xyxy if self.angle is None else self.xywha
+    #     # return coords.tolist() + [self.track_id, self.score, self.cls, self.idx]
+    #     #STrack object results (byte tracker list[STrack])
+    #     #returns nparray of strack results
+    #     return self.tracker.update(enemy_boxes.cpu().numpy())
+        
         
     def screen_cap(self):
         return self.camera.grab()
@@ -193,6 +250,24 @@ class Main:
         cv2.imshow("Screen Capture Detection", display_frame)
         cv2.waitKey(1)
         
+    # def test(self):
+    #     # threading.Thread(target=self.input_detection, daemon=True).start()
+
+    #     while True:
+    #         # time.sleep(.5)
+    #         frame = self.screen_cap()
+    #         if frame is None:
+    #             continue
+            
+    #         processed_frame = self.preprocess(frame)
+    #         results = self.model.inference_cp(input_data = processed_frame)
+    #         print(results)
+    #         if self.debug:
+    #             # print(type(frame))
+    #             # print(frame.shape)
+    #             display_frame = cp.asnumpy(frame)
+    #             self.debug_render(display_frame)
+
 class FPSTracker:
     def __init__(self, update_interval=1.0):
         self.frame_count = 0
