@@ -28,56 +28,34 @@ from argparse import Namespace
 
 class Main:
     def __init__(self):
-        self.debug = True
+        self.debug = False
         self.screen_x = 2560
         self.screen_y = 1440#should add auto detection for dimensions
         self.target_cls_id = 0#make sure class is is correct
         
         base_dir = "runs/train/EFPS_4000img_11n_1440p_batch11_epoch100\weights"
-        model_name = "320x320_stripped.engine"#tensorrt api needs a stripped metadata model if trained using yolo
+        model_name = "320x320_fp16True_int8False_stripped.engine"#tensorrt api needs a stripped metadata model if trained using yolo
         model_path = os.path.join(os.getcwd(), base_dir, model_name)
-        
-        model_name = os.path.basename(model_path)
-        self.model_ext = os.path.splitext(model_name)[1]
-        if self.model_ext == '.engine':
-            
-            h_end_idx = model_name.index('x')
-            w_end_idx = model_name.index('_')#has to be mxn_stripped.engine for this to work
-            self.h_w_capture = (int(model_name[:h_end_idx]),int(model_name[h_end_idx+1:w_end_idx]))#extracts dimensions from engine name
-            #should probably extract the image size from the engine file itself during loading
-            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, imgsz= self.h_w_capture, conf_threshold= .25,verbose = False)
-            if self.model == None:
-                raise Exception("tensorrt engine not loading correctly maybe set verbose = True")
-        elif self.model_ext == '.pt':
-            self.h_w_capture = (1024,1024)#can be set to whatever
-            self.model = YOLO(model = model_path)
-        else:
-            print('bruh this model format not supported')
-            print(f'current file format: {self.model_ext}')
-            return
-        
+        #hw_capture for engine format defined by engine file
+        #not using yolo for loading engine they stink
+        self.load_model(model_path, hw_capture = (640,640))
         self.is_key_pressed = False
         self.screen_center = (self.screen_x // 2,self.screen_y // 2)
-        self.x_offset = (self.screen_x - self.h_w_capture[1])//2
-        self.y_offset = (self.screen_y - self.h_w_capture[0])//2
+        self.x_offset = (self.screen_x - self.hw_capture[1])//2
+        self.y_offset = (self.screen_y - self.hw_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.target_dimensions = self.h_w_capture#aimbot window, dont really need
-        
+        self.target_dimensions = self.hw_capture#aimbot window, dont really need
         self.setup_tracking()
         self.setup_targeting()
-
         if self.debug:
-            window_height, window_width = self.h_w_capture
+            window_height, window_width = self.hw_capture
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
             
-        self.empty_boxes = Boxes(boxes=torch.empty((0, 6), device=torch.device('cuda')),orig_shape=self.h_w_capture)
-        
+        self.empty_boxes = Boxes(boxes=torch.empty((0, 6), device=torch.device('cuda')),orig_shape=self.hw_capture)
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
         self.camera = betterercam.create(region = capture_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)#yolo does bgr -> rgb conversion in model.predict automatically
-
-        
         
     def main(self):     
         threading.Thread(target=self.input_detection, daemon=True).start()
@@ -85,41 +63,44 @@ class Main:
         try:
             while True:
                 # time.sleep(1)
- 
-                frame = self.screen_cap()
+                frame = self.camera.grab()
                 if frame is None:
                     continue
                 if self.model_ext == '.engine':
                     processed_frame = self.preprocess(frame)
                     self.inference(processed_frame)
-
                 elif self.model_ext == '.pt':
                     processed_frame = self.preprocess_torch(frame)
                     self.inference_torch(processed_frame)
-                else:
-                    print('bruh this model format not supported')
-                    print(f'current file format: {self.model_ext}')
-                    raise Exception('dieded')
+
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_objects = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
-                
                 if self.debug:
-                    # print(type(frame))
-                    # print(frame.shape)
                     display_frame = cp.asnumpy(frame)
                     display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
                     self.debug_render(display_frame)
                 if self.is_key_pressed and len(tracked_objects) > 0:
                     self.aimbot(tracked_objects)
                 self.fps_tracker.update()
-
-                
         except KeyboardInterrupt:
             print('Shutting down...')
         finally:
             self.cleanup()
 
-
+    def load_model(self, model_path, hw_capture: tuple[int,int]):
+        model_name = os.path.basename(model_path)
+        self.model_ext = os.path.splitext(model_name)[1]
+        if self.model_ext == '.engine':
+            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, conf_threshold= .25,verbose = False)
+            self.hw_capture = self.model.imgsz
+            if self.model == None:
+                raise Exception("tensorrt engine not loading correctly maybe set verbose = True")
+        elif self.model_ext == '.pt':
+            self.hw_capture = hw_capture#can be set to whatever
+            self.model = YOLO(model = model_path)
+        else:
+            raise Exception(f'wrong file format dingus: {self.model_ext}')
+        
     def setup_tracking(self):
         target_frame_rate = 144
         args = Namespace(
@@ -134,8 +115,8 @@ class Main:
     
     def setup_targeting(self):
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
-        self.x_offset = (self.screen_x - self.h_w_capture[1])//2
-        self.y_offset = (self.screen_y - self.h_w_capture[0])//2
+        self.x_offset = (self.screen_x - self.hw_capture[1])//2
+        self.y_offset = (self.screen_y - self.hw_capture[0])//2
         
         self.target_selector = targetselector.TargetSelector(
             screen_center=self.screen_center,
@@ -164,7 +145,6 @@ class Main:
         delta_x = deltas[0]
         delta_y = deltas[1]
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
-        
             
     def input_detection(self):
         def on_key_press(event):
@@ -198,38 +178,26 @@ class Main:
         )
 
         return boxes 
+    
     #almost 25% speedup over np (preprocess + inference)
     #also python doesnt have method overloading by parameter type
     def preprocess(self,frame: cp.ndarray):
-        bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
+        bchw = frame.transpose(2, 0, 1)[cp.newaxis, ...]
         float_frame = bchw.astype(cp.float32, copy=False)
         float_frame /= 255.0 #/= is inplace, / creates a new cp arr
         return cp.ascontiguousarray(float_frame)
 
-    # def preprocess(frame):
-    #     tensor = torch.from_numpy(frame).to(device='cuda', non_blocking=True)
-    #     tensor = tensor.permute(2, 0, 1).unsqueeze_(0).half().div_(255)
-    #     return tensor.contiguous()
-    
-
     def inference(self,source):
-        
         results = self.model.inference_cp(input_data = source)
-        # print('cp results')
-        # print(results)
         results = torch.as_tensor(results)#should be pretty inexpensive since it still stays on gpu
-        # print('torch results')
-        # print(results)
-        results = self.parse_results_into_boxes(results, self.h_w_capture)
-        # print('parsed results')
-        # print(results)
+        results = self.parse_results_into_boxes(results, self.hw_capture)
         return self.tracker.update(results.cpu().numpy())
     
     @torch.inference_mode()
     def inference_torch(self,source):
         results = self.model(source=source,
              conf = .25,
-             imgsz=self.h_w_capture,
+             imgsz=self.hw_capture,
              verbose = False
          )
         if results[0].boxes.data.numel() == 0: 
@@ -240,7 +208,7 @@ class Main:
             filtered_data = results[0].boxes.data[enemy_mask]
             enemy_boxes = Boxes(
                 boxes=filtered_data,
-                orig_shape=self.h_w_capture
+                orig_shape=self.hw_capture
             )
     # coords = self.xyxy if self.angle is None else self.xywha
     # return coords.tolist() + [self.track_id, self.score, self.cls, self.idx]
@@ -252,10 +220,6 @@ class Main:
          float_frame = bchw.astype(cp.float16, copy=False)
          float_frame /= 255.0 #/= is inplace, / creates a new cp arr
          return torch.as_tensor(float_frame)
-        
-        
-    def screen_cap(self):
-        return self.camera.grab()
     
     def debug_render(self,frame):
         display_frame = cp.asnumpy(frame)
