@@ -4,13 +4,13 @@ import tensorrt as trt
 #init context in here bad
 import numpy as np
 import cupy as cp
-
+import pycuda.cuda as cuda
 
 
 
 class TensorRT_Engine:
     def __init__(self,engine_file_path, imgsz, conf_threshold,verbose = False):
-        self.TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE) if verbose else trt.Logger(trt.Logger.INTERNAL_ERROR)
+        self.TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE) if verbose else trt.Logger(trt.Logger.INFO)
         self.engine = self._load_engine(engine_file_path)
         self.context = self.engine.create_execution_context()
         self.input_tensor_name = self.engine.get_tensor_name(0)#assuming first tensor is input
@@ -41,27 +41,19 @@ class TensorRT_Engine:
             return runtime.deserialize_cuda_engine(f.read())
 
     def inference_cp(self, input_data: cp.ndarray) -> cp.ndarray:
-        # print(f'tensorrt_engine')
-        # print(input_data)
-        # print('inference_cp:')
-        # print(input_data.shape)
-        # print(input_data.data.ptr)
         if input_data.data.ptr == 0:
             raise ValueError("Input tensor has an invalid address")
         if self.output_ptr == 0:
             raise ValueError("Output tensor has an invalid address")
-
         if input_data.dtype != cp.float32:  # Adjust dtype as needed
             input_data = input_data.astype(cp.float32)
-
-
         try:
             self.context.set_tensor_address(self.input_tensor_name, input_data.data.ptr)
             self.context.set_tensor_address(self.output_tensor_name, self.output_ptr)
         except Exception as e:
             raise RuntimeError(f"Failed to set tensor address: {e}")
 
-
+        # self.context.set_tensor_address(self.input_tensor_name, input_data.data.ptr)
         self.context.execute_async_v3(self.stream.ptr)
 
         self.stream.synchronize()
@@ -77,16 +69,17 @@ class TensorRT_Engine:
         # print(filtered_results.shape)
         return filtered_results
     
-    # def inference_np(self,input_data: np.ndarray) -> np.ndarray:
-    #     #should add direct cupy integration
-    #     #output as cupy arr?
-    #     #should probably handle cupy -> cpu outside of this class
-    #     cuda.memcpy_htod_async(self.input_ptr, input_data, self.stream)
-    #     self.context.execute_async_v3(self.stream.handle)
-    #     output = np.empty(self.output_shape, dtype=np.float32)
-    #     cuda.memcpy_dtoh_async(output, self.output_ptr ,self.stream)
-    #     self.stream.synchronize()
-    #     return output
+    def inference_np(self,input_data: np.ndarray) -> np.ndarray:
+        #should add direct cupy integration
+        #output as cupy arr?
+        #should probably handle cupy -> cpu outside of this class
+        cuda.memcpy_htod_async(self.input_ptr, input_data, self.stream)
+        self.context.execute_async_v3(self.stream.handle)
+        output = np.empty(self.output_shape, dtype=np.float32)
+        cuda.memcpy_dtoh_async(output, self.output_ptr ,self.stream)
+        self.stream.synchronize()
+        return output
+    
     def _malloc_iotensors(self):
 
         self.output_buffer = cp.empty(self.output_shape, dtype=trt.nptype(self.output_dtype))
@@ -95,20 +88,15 @@ class TensorRT_Engine:
         self.context.set_tensor_address(self.input_tensor_name, self.input_ptr)
         self.context.set_tensor_address(self.output_tensor_name, self.output_ptr)
                 
-
 if __name__ == '__main__':
     import cv2
     import time
     cwd = os.getcwd()
-    base_dir = "runs/train/EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights"
-    engine_name = "896x1440_stripped.engine"
+    base_dir = "runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights"
+    engine_name = "320x320_stripped.engine"
     model_path = os.path.join(cwd, base_dir, engine_name)
-    imgsz = (896,1440)
+    imgsz = (320,320)
     model = TensorRT_Engine(model_path,imgsz,conf_threshold= 0)
-
-
-
-  
 
     img_path = os.path.join(cwd, 'train/datasets/EFPS_4000img/images/train/frame_1012(1013).jpg')
     img = cv2.imread(img_path)
@@ -134,14 +122,14 @@ if __name__ == '__main__':
         output = model.inference_cp(cp_img)
         print("Output shape:", output.shape)
         print(output)
-        output = None
-        cp_img = None
+        # output = None
+        # cp_img = None
 
-
-    # for i in range(64):
-    #     start = time.perf_counter()
-    #     for _ in range(1000):
-    #         results = model.inference_cp(cp_img)
-    #     print(f"Inference/s: {1000 / (time.perf_counter() - start):.2f}")
-
+    fart = time.perf_counter()
+    for i in range(16):
+        start = time.perf_counter()
+        for _ in range(1000):
+            results = model.inference_cp(cp_img)
+        print(f"Inference/s: {1000 / (time.perf_counter() - start):.2f}")
+    print(f'avg inference / s: {16*1000 / (time.perf_counter() - fart)}')
 

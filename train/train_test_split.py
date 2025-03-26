@@ -8,7 +8,7 @@ import time
 cwd = os.getcwd()
 base_dir = os.path.join(cwd, 'train')
 pre_split_dir = os.path.join(base_dir, 'pre_split_dataset')
-new_dir_name = "datasets//EFPS_4000img"
+new_dir_name = "datasets/FS2_OG"
 split_dir = os.path.join(base_dir, new_dir_name)
 
 images_dir = os.path.join(pre_split_dir, 'images')
@@ -63,7 +63,7 @@ def bfs_find_files(root_dir, extensions):
 
 image_files = bfs_find_files(images_dir, ('.jpg', '.png', '.jpeg'))
 
-train_images, val_images = train_test_split(image_files, test_size=0.2, random_state=42)
+train_images, val_images = train_test_split(image_files, test_size=0.2, random_state=32)
 
 def copy_image_and_label(img, target_img_dir, target_label_dir):
     base_name = os.path.basename(img)

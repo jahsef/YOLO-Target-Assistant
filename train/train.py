@@ -9,11 +9,11 @@ def main():
         
     # Define the paths to the dataset and YAML file
     cwd = os.getcwd()
-    data_yaml_path = os.path.join(cwd,'train//datasets/EFPS_4000img//data.yaml')  # Update with your data.yaml path
+    data_yaml_path = os.path.join(cwd,'train//datasets/FS2_OG//data.yaml')  # Update with your data.yaml path
 
-    epochs = 100  # Adjust the number of epochs as needed
-    batch = 11  # Adjust based on your GPU memory
-    nbs = 33 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
+    epochs = 200  # Adjust the number of epochs as needed
+    batch = 4 # Adjust based on your GPU memory
+    nbs = 4 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
     imgsz = 1440  # Image size for training
     # Load the YOLOv8 model (pretrained or custom)
     model = YOLO("yolo11n.pt")  # Use the YOLOv8 pre-trained weights or your own
@@ -28,12 +28,12 @@ def main():
         project='runs/train',  # Directory to save the tra  ining results
         resume = False,
         device = 0,
-        name='EFPS_4000img_11n_1440p_batch11_epoch100',  # Directory name for the run
+        name='FS2_OG_11n_batch4_nbs4_lr01e-5_epoch200',  # Directory name for the run
         exist_ok=True,  # Overwrite the existing directory if necessary
         cache = 'disk',#takes in bool or string ig what
         patience = 16,#0 = no early stopping
         rect = False, #may need to experiment with this, default False
-        save_period = 5,#save every 10 epochs
+        save_period = 0,#save every 10 epochs
         fraction = 1,#fraction of train
         plots = True,#generates some more plots
         cos_lr = True,#cos learning rate scheduler, convergence more stable
@@ -43,7 +43,7 @@ def main():
         pretrained = True,
         warmup_epochs=5,
         nbs=nbs,    
-        lr0 = 1e-4,
+        lr0 = 1e-5,
         augment = True
     )
 

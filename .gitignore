@@ -9,7 +9,7 @@
 *.pt
 *.engine
 *.onnx
-
+*.yaml
 runs/
 train/datasets/
 train\pre_split_dataset\

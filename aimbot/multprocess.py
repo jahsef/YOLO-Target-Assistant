@@ -31,7 +31,7 @@ class Threaded:
 
         self.screen_x = 2560
         self.screen_y = 1440
-        self.capture_dim = (896,1440)#hxw
+        self.capture_dim = (320,320)#hxw
         self.max_detections = 16
         self.screen_center_x = self.screen_x // 2
         self.screen_center_y = self.screen_y // 2
@@ -153,11 +153,11 @@ class Threaded:
 
         # model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
         # self.model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/best.engine"))
-        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/best.engine"))
+        model = YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights/320x320.engine"))
         read_num = 0
         
         #if frame not ready yet wont explode
-        tensor = np.zeros((896,1440,3),dtype = np.uint8)
+        tensor = np.zeros((320,320,3),dtype = np.uint8)
         
         while True:
             

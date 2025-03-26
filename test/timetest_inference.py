@@ -23,9 +23,9 @@ torch.cuda.empty_cache()
 
 # model = ultralytics.YOLO(os.path.join(os.getcwd(),"runs/train/EFPS_4000img_11s_1440p_batch6_epoch200/weights/best.engine"))
 cwd = os.getcwd()
-base_dir = "runs/train/EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights"
-engine_name = "896x1440.engine"
-imgsz = (896,1440)
+base_dir = "runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights"
+engine_name = "320x320.engine"
+imgsz = (320,320)
 model = ultralytics.YOLO(os.path.join(cwd,base_dir,engine_name))
 
 img_path = os.path.join(cwd, 'train/datasets/EFPS_4000img/images/train/frame_1012(1013).jpg')
