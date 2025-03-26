@@ -28,38 +28,41 @@ from argparse import Namespace
 
 class Main:
     def __init__(self):
-        self.debug = False
+        self.debug = True
         self.screen_x = 2560
-        self.screen_y = 1440
+        self.screen_y = 1440#should add auto detection for dimensions
+        self.target_cls_id = 0#make sure class is is correct
         
-        # base_dir = "runs/train/EFPS_4000img_11s_retrain_1440p_batch6_epoch200\weights"
         base_dir = "runs/train/EFPS_4000img_11n_1440p_batch11_epoch100\weights"
         model_name = "320x320_stripped.engine"#tensorrt api needs a stripped metadata model if trained using yolo
-        self.model_ext = os.path.splitext(model_name)[1]
         model_path = os.path.join(os.getcwd(), base_dir, model_name)
         
+        model_name = os.path.basename(model_path)
+        self.model_ext = os.path.splitext(model_name)[1]
         if self.model_ext == '.engine':
+            
             h_end_idx = model_name.index('x')
             w_end_idx = model_name.index('_')#has to be mxn_stripped.engine for this to work
             self.h_w_capture = (int(model_name[:h_end_idx]),int(model_name[h_end_idx+1:w_end_idx]))#extracts dimensions from engine name
             #should probably extract the image size from the engine file itself during loading
-            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, imgsz= self.h_w_capture, conf_threshold= .25)
+            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, imgsz= self.h_w_capture, conf_threshold= .25,verbose = False)
+            if self.model == None:
+                raise Exception("tensorrt engine not loading correctly maybe set verbose = True")
         elif self.model_ext == '.pt':
-            self.h_w_capture = (320,320)#can be set to whatever
+            self.h_w_capture = (1024,1024)#can be set to whatever
             self.model = YOLO(model = model_path)
         else:
             print('bruh this model format not supported')
             print(f'current file format: {self.model_ext}')
             return
-
-        self.target_cls_id = 0
+        
         self.is_key_pressed = False
         self.screen_center = (self.screen_x // 2,self.screen_y // 2)
         self.x_offset = (self.screen_x - self.h_w_capture[1])//2
         self.y_offset = (self.screen_y - self.h_w_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.target_dimensions = self.h_w_capture#aimbot window
+        self.target_dimensions = self.h_w_capture#aimbot window, dont really need
         
         self.setup_tracking()
         self.setup_targeting()
@@ -70,6 +73,7 @@ class Main:
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
             
         self.empty_boxes = Boxes(boxes=torch.empty((0, 6), device=torch.device('cuda')),orig_shape=self.h_w_capture)
+        
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
         self.camera = betterercam.create(region = capture_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)#yolo does bgr -> rgb conversion in model.predict automatically
 
@@ -81,19 +85,21 @@ class Main:
         try:
             while True:
                 # time.sleep(1)
+ 
                 frame = self.screen_cap()
                 if frame is None:
                     continue
                 if self.model_ext == '.engine':
                     processed_frame = self.preprocess(frame)
-                    self.inference(frame)
+                    self.inference(processed_frame)
+
                 elif self.model_ext == '.pt':
                     processed_frame = self.preprocess_torch(frame)
                     self.inference_torch(processed_frame)
                 else:
                     print('bruh this model format not supported')
                     print(f'current file format: {self.model_ext}')
-                    raise KeyboardInterrupt
+                    raise Exception('dieded')
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_objects = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
                 
@@ -112,7 +118,8 @@ class Main:
             print('Shutting down...')
         finally:
             self.cleanup()
-            
+
+
     def setup_tracking(self):
         target_frame_rate = 144
         args = Namespace(
@@ -197,49 +204,54 @@ class Main:
         bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
         float_frame = bchw.astype(cp.float32, copy=False)
         float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-
         return cp.ascontiguousarray(float_frame)
-        # return torch.as_tensor(float_frame, device='cuda')
+
     # def preprocess(frame):
     #     tensor = torch.from_numpy(frame).to(device='cuda', non_blocking=True)
     #     tensor = tensor.permute(2, 0, 1).unsqueeze_(0).half().div_(255)
     #     return tensor.contiguous()
     
-    @torch.inference_mode()
-    def inference(self,source):
 
+    def inference(self,source):
+        
         results = self.model.inference_cp(input_data = source)
-        results = torch.as_tensor(results)
+        # print('cp results')
+        # print(results)
+        results = torch.as_tensor(results)#should be pretty inexpensive since it still stays on gpu
+        # print('torch results')
+        # print(results)
         results = self.parse_results_into_boxes(results, self.h_w_capture)
+        # print('parsed results')
+        # print(results)
         return self.tracker.update(results.cpu().numpy())
     
     @torch.inference_mode()
     def inference_torch(self,source):
-        
         results = self.model(source=source,
              conf = .25,
              imgsz=self.h_w_capture,
              verbose = False
-         )#could immediately pass this stuff to another thread/process but might add some latency
+         )
         if results[0].boxes.data.numel() == 0: 
             enemy_boxes = self.empty_boxes
         else:
             cls_target = 0
             enemy_mask = results[0].boxes.cls == cls_target
-            filtered_data = results[0].boxes.data[enemy_mask]  # Filter the 'data' attribute
+            filtered_data = results[0].boxes.data[enemy_mask]
             enemy_boxes = Boxes(
-                boxes=filtered_data,  # Pass the filtered 'data' tensor
+                boxes=filtered_data,
                 orig_shape=self.h_w_capture
             )
     # coords = self.xyxy if self.angle is None else self.xywha
     # return coords.tolist() + [self.track_id, self.score, self.cls, self.idx]
     #STrack object results (byte tracker list[STrack])
-        return self.tracker.update(enemy_boxes.cpu().numpy())#return results
+        return self.tracker.update(enemy_boxes.cpu().numpy())
+
     def preprocess_torch(self,frame: cp.ndarray) -> torch.Tensor:
          bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
          float_frame = bchw.astype(cp.float16, copy=False)
          float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-         return torch.as_tensor(float_frame, device='cuda')
+         return torch.as_tensor(float_frame)
         
         
     def screen_cap(self):
@@ -247,7 +259,7 @@ class Main:
     
     def debug_render(self,frame):
         display_frame = cp.asnumpy(frame)
-        stracks = [x for x in self.tracker.tracked_stracks if x.is_activated]
+        stracks = [x for x in self.tracker.tracked_stracks if x.is_activated]#not sure if activated is needed
         #strack.results doesnt have what i want
         
         for strack in stracks:

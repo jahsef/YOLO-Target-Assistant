@@ -108,28 +108,28 @@ if __name__ == '__main__':
     np_img = np.ascontiguousarray(img)
     
     cp_img = cp.asarray(np_img) 
-    # print(f'cp shape: {cp_img.shape}')
-    # output = model.inference_cp(cp_img)
-    # print("Output shape:", output.shape)
-    # batch_idx = 0
-    # detection_idx = 0
-    # print(output[batch_idx][detection_idx])
+    print(f'cp shape: {cp_img.shape}')
+    output = model.inference_cp(cp_img)
+    print("Output shape:", output.shape)
+    batch_idx = 0
+    detection_idx = 0
+    print(output)
 
     # warmpsudps
-    for _ in range(64):
-        cp_img = cp.asarray(np_img) 
-        # print(cp_img.data.ptr)
-        output = model.inference_cp(cp_img)
-        print("Output shape:", output.shape)
-        print(output)
-        # output = None
-        # cp_img = None
+    # for _ in range(64):
+    #     cp_img = cp.asarray(np_img) 
+    #     # print(cp_img.data.ptr)
+    #     output = model.inference_cp(cp_img)
+    #     print("Output shape:", output.shape)
+    #     print(output)
+    #     # output = None
+    #     # cp_img = None
 
-    fart = time.perf_counter()
-    for i in range(16):
-        start = time.perf_counter()
-        for _ in range(1000):
-            results = model.inference_cp(cp_img)
-        print(f"Inference/s: {1000 / (time.perf_counter() - start):.2f}")
-    print(f'avg inference / s: {16*1000 / (time.perf_counter() - fart)}')
+    # fart = time.perf_counter()
+    # for i in range(16):
+    #     start = time.perf_counter()
+    #     for _ in range(1000):
+    #         results = model.inference_cp(cp_img)
+    #     print(f"Inference/s: {1000 / (time.perf_counter() - start):.2f}")
+    # print(f'avg inference / s: {16*1000 / (time.perf_counter() - fart)}')
 
