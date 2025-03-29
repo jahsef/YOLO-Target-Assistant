@@ -98,7 +98,7 @@ if __name__ == '__main__':
     torch.cuda.empty_cache()
     cwd = os.getcwd()
     base_dir = "runs/train/EFPS_4000img_11n_1440p_batch11_epoch100/weights"
-    engine_name = "320x320_stripped.engine"
+    engine_name = "320x320_fp16True_int8False_stripped.engine"
     model_path = os.path.join(cwd, base_dir, engine_name)
     imgsz = (320,320)
     model = TensorRT_Engine(model_path,conf_threshold= 0, verbose = True)

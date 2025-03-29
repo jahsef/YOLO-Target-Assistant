@@ -16,25 +16,30 @@ import cupy as cp
 import numpy as np
 github_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
-# can replace with bettercam just no cupy support
+# can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 # print(betterercam.__file__)
 from utils import targetselector, tensorrt_engine
 from argparse import Namespace  
+from screeninfo import get_monitors
 
-# import pycuda.autoinit#auto init cuda mem context
-#no no init context use default context
 
 
 class Main:
     def __init__(self):
         self.debug = False
-        self.screen_x = 2560
-        self.screen_y = 1440#should add auto detection for dimensions
+        monitor = get_monitors()[0]#monitor num
+        self.screen_x = monitor.width
+        self.screen_y = monitor.height
         self.target_cls_id = 0#make sure class is is correct
         
-        base_dir = "runs/train/EFPS_4000img_11n_1440p_batch11_epoch100\weights"
-        model_name = "320x320_fp16True_int8False_stripped.engine"#tensorrt api needs a stripped metadata model if trained using yolo
+        # base_dir = "runs/train/EFPS_11n_4000img_640x640\weights"
+        base_dir = 'runs/train/EFPS_11n_4000img_640x640_batch16/weights'
+        # EFPS_4000img_11n_1440p_batch11_epoch100
+        # EFPS_11n_4000img_640x640
+        model_name = "320x320_fp16True_stripped.engine"#tensorrt api needs a stripped metadata model if trained using yolo
+        # model_name = 'best.pt'
+        #320x320_fp16True_stripped.engine
         model_path = os.path.join(os.getcwd(), base_dir, model_name)
         #hw_capture for engine format defined by engine file
         #not using yolo for loading engine they stink
@@ -45,7 +50,7 @@ class Main:
         self.y_offset = (self.screen_y - self.hw_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.target_dimensions = self.hw_capture#aimbot window, dont really need
+        # self.target_dimensions = self.hw_capture#aimbot window, dont really need
         self.setup_tracking()
         self.setup_targeting()
         if self.debug:
@@ -75,12 +80,15 @@ class Main:
 
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_objects = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
+                #(x1,y1,x2,y2,conf,cls_id)
                 if self.debug:
                     display_frame = cp.asnumpy(frame)
                     display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
                     self.debug_render(display_frame)
                 if self.is_key_pressed and len(tracked_objects) > 0:
+                    # poob = time.perf_counter_ns()
                     self.aimbot(tracked_objects)
+                    # print(f'time elapsed: {(time.perf_counter_ns() - poob)/1e6}')
                 self.fps_tracker.update()
         except KeyboardInterrupt:
             print('Shutting down...')
@@ -122,8 +130,7 @@ class Main:
             screen_center=self.screen_center,
             x_offset=self.x_offset,
             y_offset=self.y_offset,
-            head_toggle=self.head_toggle,
-            target_dimensions= self.target_dimensions
+            head_toggle=self.head_toggle
         )
 
             
@@ -136,7 +143,7 @@ class Main:
         torch.cuda.empty_cache()
         
     def aimbot(self, tracked_objects):  
-        deltas = self.target_selector.return_deltas(tracked_objects)
+        deltas = self.target_selector.return_deltas_vectorized(tracked_objects)
         # print(type(deltas))
         if deltas:#if valid target
             self.move_mouse_to_bounding_box(deltas)
@@ -191,7 +198,7 @@ class Main:
         results = self.model.inference_cp(input_data = source)
         results = torch.as_tensor(results)#should be pretty inexpensive since it still stays on gpu
         results = self.parse_results_into_boxes(results, self.hw_capture)
-        return self.tracker.update(results.cpu().numpy())
+        return self.tracker.update(results.cpu().numpy())#.cpu().numpy()
     
     @torch.inference_mode()
     def inference_torch(self,source):

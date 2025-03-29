@@ -20,7 +20,7 @@ def crop(image_list):
         
         
         original_dim = (image.shape[1],image.shape[0])#wxh
-        crop_dim = (1440,1440)#wxh
+        crop_dim = (640,640)#wxh
         offset_width = (original_dim[0] - crop_dim[0])//2
         offset_height= (original_dim[1] - crop_dim[1])//2
 
@@ -30,7 +30,7 @@ def crop(image_list):
         cv2.imwrite(os.path.join(cropped_dir,image_name), image)
 
 if __name__ == '__main__':
-    n_processes = 16
+    n_processes = 1
     for i in range(n_processes):
         curr_images_list = images_list[i::n_processes]
         print(len(curr_images_list))

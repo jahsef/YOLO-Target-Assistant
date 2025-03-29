@@ -8,7 +8,7 @@ import time
 cwd = os.getcwd()
 base_dir = os.path.join(cwd, 'train')
 pre_split_dir = os.path.join(base_dir, 'pre_split_dataset')
-new_dir_name = "datasets/FS2_OG"
+new_dir_name = "datasets/EFPS_4000img_640x640"
 split_dir = os.path.join(base_dir, new_dir_name)
 
 images_dir = os.path.join(pre_split_dir, 'images')
