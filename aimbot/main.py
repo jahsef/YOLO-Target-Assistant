@@ -8,14 +8,14 @@ import time
 import keyboard
 import win32api
 import win32con
-import os
+# import os
 import torch
 import sys
 from pathlib import Path
 import cupy as cp
 import numpy as np
 github_dir = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(os.path.join(github_dir,'BettererCam')))
+sys.path.insert(0, str(github_dir / 'Betterercam'))
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 # print(betterercam.__file__)
@@ -27,20 +27,15 @@ from screeninfo import get_monitors
 
 class Main:
     def __init__(self):
-        self.debug = False
+        self.debug = True
         monitor = get_monitors()[0]#monitor num
         self.screen_x = monitor.width
         self.screen_y = monitor.height
-        self.target_cls_id = 0#make sure class is is correct
-        
-        # base_dir = "runs/train/EFPS_11n_4000img_640x640\weights"
-        base_dir = 'runs/train/EFPS_11n_4000img_640x640_batch16/weights'
-        # EFPS_4000img_11n_1440p_batch11_epoch100
-        # EFPS_11n_4000img_640x640
-        model_name = "320x320_fp16True_stripped.engine"#tensorrt api needs a stripped metadata model if trained using yolo
-        # model_name = 'best.pt'
-        #320x320_fp16True_stripped.engine
-        model_path = os.path.join(os.getcwd(), base_dir, model_name)
+        self.target_cls_id = 0#make sure class is is correct\
+        self.crosshair_cls_id = 2 #None if ur model dont support
+        base_dir = 'models/pf_600img_11n_tefps2/weights'
+        model_name = "best.pt" #"best.pt" "320x320_fp16True_stripped.engine"
+        model_path = Path.cwd() / base_dir / model_name
         #hw_capture for engine format defined by engine file
         #not using yolo for loading engine they stink
         self.load_model(model_path, hw_capture = (640,640))
@@ -77,9 +72,10 @@ class Main:
                 elif self.model_ext == '.pt':
                     processed_frame = self.preprocess_torch(frame)
                     self.inference_torch(processed_frame)
-
+                # print(results)
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_objects = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
+                # print(tracked_objects)
                 #(x1,y1,x2,y2,conf,cls_id)
                 if self.debug:
                     display_frame = cp.asnumpy(frame)
@@ -96,8 +92,7 @@ class Main:
             self.cleanup()
 
     def load_model(self, model_path, hw_capture: tuple[int,int]):
-        model_name = os.path.basename(model_path)
-        self.model_ext = os.path.splitext(model_name)[1]
+        self.model_ext = model_path.suffix
         if self.model_ext == '.engine':
             self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, conf_threshold= .25,verbose = False)
             self.hw_capture = self.model.imgsz
@@ -123,16 +118,17 @@ class Main:
     
     def setup_targeting(self):
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
-        self.x_offset = (self.screen_x - self.hw_capture[1])//2
-        self.y_offset = (self.screen_y - self.hw_capture[0])//2
+        # self.x_offset = (self.screen_x - self.hw_capture[1])//2
+        # self.y_offset = (self.screen_y - self.hw_capture[0])//2
         
         self.target_selector = targetselector.TargetSelector(
-            screen_center=self.screen_center,
-            x_offset=self.x_offset,
-            y_offset=self.y_offset,
-            head_toggle=self.head_toggle
+            detection_window_dim=self.hw_capture,
+            # x_offset=self.x_offset,
+            # y_offset=self.y_offset,
+            head_toggle=self.head_toggle,
+            target_cls_id=self.target_cls_id,
+            crosshair_cls_id=self.crosshair_cls_id
         )
-
             
     def cleanup(self):
         if self.camera:
@@ -143,9 +139,12 @@ class Main:
         torch.cuda.empty_cache()
         
     def aimbot(self, tracked_objects):  
+        # print(f'aimbot: {tracked_objects.shape}')
+        # print(tracked_objects)
+        # print('ambatu')
         deltas = self.target_selector.return_deltas_vectorized(tracked_objects)
         # print(type(deltas))
-        if deltas:#if valid target
+        if deltas is not None:#if valid target
             self.move_mouse_to_bounding_box(deltas)
 
     def move_mouse_to_bounding_box(self, deltas):
@@ -155,32 +154,33 @@ class Main:
             
     def input_detection(self):
         def on_key_press(event):
-            if event.name.lower() == 'e':
+            if event.name.lower() == 'y':
                 self.is_key_pressed = not self.is_key_pressed
                 print(f"Key toggled: {self.is_key_pressed}")
 
                 
         keyboard.on_press(on_key_press)
-        while True:
+        while True:#keeps thread alive
             time.sleep(.1)
             
-    def parse_results_into_boxes(self,results: torch.Tensor, orig_shape: tuple, ):
+    def parse_results_into_boxes(self,results: torch.Tensor, orig_shape: tuple ):
         #should probably make this work for both .engine and .pt
         # Check if results are empty
-        if len(results) == 0:
+        
+        if len(results) == 0:#xyxy, conf, cls, smth else?
             return Boxes(boxes=torch.empty((0, 6)), orig_shape=orig_shape)
 
         # Filter results by class ID
-        cls_mask = results[:, 5] == self.target_cls_id  # Create mask for cls_target
-        filtered_results = results[cls_mask]   # Apply mask to filter results
+        # cls_mask = results[:, 5] == self.target_cls_id
+        # filtered_results = results[cls_mask] 
 
         # If no boxes match the target class, return empty Boxes object
-        if len(filtered_results) == 0:
-            return self.empty_boxes
+        # if len(filtered_results) == 0:
+        #     return self.empty_boxes
 
         # Construct Boxes object
         boxes = Boxes(
-            boxes=filtered_results,  # Filtered results [x1, y1, x2, y2, conf, cls_id]
+            boxes=results,  # Filtered results [x1, y1, x2, y2, conf, cls_id]
             orig_shape=orig_shape    # Original image dimensions (height, width)
         )
 
@@ -199,28 +199,29 @@ class Main:
         results = torch.as_tensor(results)#should be pretty inexpensive since it still stays on gpu
         results = self.parse_results_into_boxes(results, self.hw_capture)
         return self.tracker.update(results.cpu().numpy())#.cpu().numpy()
+        # return results
     
     @torch.inference_mode()
     def inference_torch(self,source):
         results = self.model(source=source,
-             conf = .25,
-             imgsz=self.hw_capture,
-             verbose = False
-         )
+            conf = .25,
+            imgsz=self.hw_capture,
+            verbose = False
+        )
         if results[0].boxes.data.numel() == 0: 
-            enemy_boxes = self.empty_boxes
-        else:
-            cls_target = 0
-            enemy_mask = results[0].boxes.cls == cls_target
-            filtered_data = results[0].boxes.data[enemy_mask]
-            enemy_boxes = Boxes(
-                boxes=filtered_data,
-                orig_shape=self.hw_capture
-            )
+            return self.tracker.update(self.empty_boxes.cpu().numpy())
+        # else:
+        #     cls_target = 0
+        #     enemy_mask = results[0].boxes.cls == cls_target
+        #     filtered_data = results[0].boxes.data[enemy_mask]
+        #     enemy_boxes = Boxes(
+        #         boxes=filtered_data,
+        #         orig_shape=self.hw_capture
+        #     )
     # coords = self.xyxy if self.angle is None else self.xywha
     # return coords.tolist() + [self.track_id, self.score, self.cls, self.idx]
     #STrack object results (byte tracker list[STrack])
-        return self.tracker.update(enemy_boxes.cpu().numpy())
+        return self.tracker.update(results[0].boxes.cpu().numpy())
 
     def preprocess_torch(self,frame: cp.ndarray) -> torch.Tensor:
          bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
@@ -236,8 +237,11 @@ class Main:
         for strack in stracks:
             x1, y1, x2, y2, = map(int,strack.xyxy)
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 2)
-            cv2.putText(display_frame, f"ID: {strack.track_id}", (int(x1), int(y1) - 20),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"nums_frames_seen: {strack.end_frame - strack.start_frame}", (int(x1), int(y1) - 10),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(display_frame, f"cls_id: {strack.cls}", (int(x1), int(y1) - 36),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(display_frame, f"ID: {strack.track_id}", (int(x1), int(y1) - 24),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(display_frame, f"nums_frames_seen: {strack.end_frame - strack.start_frame}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if self.crosshair_cls_id:
+            pass
         cv2.imshow("Screen Capture Detection", display_frame)
         cv2.waitKey(1)
         

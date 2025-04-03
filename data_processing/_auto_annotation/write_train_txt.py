@@ -38,8 +38,8 @@ def generate_train_txt(images_path, train_txt_path):
     print(f"train.txt has been successfully generated at: {train_txt_path}")
 
 cwd = os.getcwd()
-images_path = os.path.join(cwd, 'train\crop_data_and_labels\data\cropped')
-train_txt_path = os.path.join(cwd, 'train\crop_data_and_labels/train.txt')
+images_path = os.path.join(cwd, 'data_processing/_auto_annotation/data/images/')
+train_txt_path = os.path.join(cwd, 'data_processing/_auto_annotation/data/train.txt')
 
 
 generate_train_txt(images_path, train_txt_path)

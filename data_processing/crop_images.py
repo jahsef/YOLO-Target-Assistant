@@ -4,9 +4,9 @@ import cv2
 from multiprocessing import Process
 
 cwd = os.getcwd()
-images_dir = os.path.join(cwd,'train/video_processing/converted_videos')
+images_dir = os.path.join(cwd,'data_processing/converted_videos')
 images_list = os.listdir(images_dir)
-cropped_dir = os.path.join(os.path.join(cwd,'train/video_processing/cropped_images'))
+cropped_dir = os.path.join(os.path.join(cwd,'data_processing/cropped_images'))
 
 
 
@@ -30,7 +30,7 @@ def crop(image_list):
         cv2.imwrite(os.path.join(cropped_dir,image_name), image)
 
 if __name__ == '__main__':
-    n_processes = 1
+    n_processes = 16
     for i in range(n_processes):
         curr_images_list = images_list[i::n_processes]
         print(len(curr_images_list))

@@ -10,9 +10,12 @@
 *.engine
 *.onnx
 *.yaml
+*.cache
+
+
 runs/
-train/datasets/
-train\pre_split_dataset\
-train/auto_annotation/data/
+datasets/
+models/
 __pycache__/
-.vscode/"train/pre_split_dataset/" 
+.vscode/
+

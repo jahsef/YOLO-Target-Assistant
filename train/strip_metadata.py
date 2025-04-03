@@ -16,7 +16,7 @@ def strip_metadata(input_file, output_file):
 
 # Example usage
 cwd = os.getcwd()
-base_dir = "runs/train/EFPS_11n_4000img_640x640_batch16/weights"
+base_dir = "models/pf_600img_11n_tefps2/weights"
 engine_name = "320x320_fp16True.engine"
 stripped_engine_name = engine_name[:engine_name.index('.')] + '_stripped.engine'
 engine_path = os.path.join(cwd,base_dir,engine_name)

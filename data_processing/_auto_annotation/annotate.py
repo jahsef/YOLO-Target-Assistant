@@ -12,14 +12,13 @@ import cupy as cp
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 cwd = os.getcwd()
-images_path = os.path.join(cwd, 'train/auto_annotation/data/images')
-labels_path = os.path.join(cwd, 'train/auto_annotation/data/labels/train')
+images_path = os.path.join(cwd, 'data_processing/_auto_annotation/data/images')
+labels_path = os.path.join(cwd, 'data_processing/_auto_annotation/data/labels/train')
 
 # Ensure the labels directory exists
 os.makedirs(labels_path, exist_ok=True)
 
-img_dim = (1440, 1440)  # Image dimensions (width, height)
-
+img_dim = (640, 640)  # Image dimensions (width, height)
 
 def clear_directory(directory):
     """Clears all files and subdirectories in the given directory."""
@@ -38,7 +37,7 @@ def clear_directory(directory):
 clear_directory(labels_path)
 
 # Load the trained model
-model = YOLO(os.path.join(os.getcwd(),"runs/train/\EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights/best.pt"))
+model = YOLO(os.path.join(os.getcwd(),"models/pf_300img_11n/weights/best.pt"))
 def preprocess(frame: cp.ndarray) -> torch.Tensor:
     bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
     float_frame = bchw.astype(cp.float16, copy=False)/255.0
@@ -68,36 +67,37 @@ def write_annotations(results, img_path):
     boxes = results[0].boxes if results else []
 
     # Handle background images
-    if len(boxes) == 0:  # No detections
-        if np.random.rand() > 0.2:  # Keep 15% of background images
-            os.remove(img_path)
-            logging.info(f"Deleted background image: {img_path}")
-        return
+    # if len(boxes) == 0:  # No detections
+    #     if np.random.rand() > 0.2:  # Keep 15% of background images
+    #         os.remove(img_path)
+    #         logging.info(f"Deleted background image: {img_path}")
+    #     return
     # Determine if the image is friendly-only
-    only_friendly = True
-    for box in boxes:
-        class_name = model.names[int(box.cls[0])]
-        if class_name == 'Enemy':
-            only_friendly = False
-            break  # Exit early if an "Enemy" is found
+    # only_friendly = True
+    # for box in boxes:
+    #     class_name = model.names[int(box.cls[0])]
+    #     if class_name == 'Enemy':
+    #         only_friendly = False
+    #         break  # Exit early if an "Enemy" is found
     # Handle friendly-only images
-    if only_friendly:
-        if np.random.rand() > 0.08:  # Keep 8% of friendly-only images
-            os.remove(img_path)
-            logging.info(f"Deleted friendly-only image: {img_path}")
-            return
+    # if only_friendly:
+    #     if np.random.rand() > 0.08:  # Keep 8% of friendly-only images
+    #         os.remove(img_path)
+    #         logging.info(f"Deleted friendly-only image: {img_path}")
+    #         return
 
-    if any(box.cls[0] == 'Enemy' for box in boxes):  #removes only high confidence enemy detections
-        if all(box.conf[0] > 0.85 for box in boxes if box.cls[0] == 'Enemy'):
-            os.remove(img_path)
-            logging.info(f"Removed high-confidence enemy image: {img_path}")
-            return
+    # if any(box.cls[0] == 'Enemy' for box in boxes):  #removes only high confidence enemy detections
+    #     if all(box.conf[0] > 0.85 for box in boxes if box.cls[0] == 'Enemy'):
+    #         os.remove(img_path)
+    #         logging.info(f"Removed high-confidence enemy image: {img_path}")
+    #         return
         
-    if np.random.rand() > 0.4:  #bomb 60% of the stuff anyway
-        os.remove(img_path)
-        logging.info(f"bombed image: {img_path}")
-        return
+    # if np.random.rand() > 0.4:  #bomb 60% of the stuff anyway
+    #     os.remove(img_path)
+    #     logging.info(f"bombed image: {img_path}")
+    #     return
     # Write annotations for detected objects
+    
     for box in boxes:
         class_name = model.names[int(box.cls[0])]
         x1, y1, x2, y2 = box.xyxy[0]  # Get bounding box coordinates
@@ -105,9 +105,14 @@ def write_annotations(results, img_path):
         # Map class name to class ID
         class_id = -1
         if class_name == "Enemy":
+            print('enemy detected')
             class_id = 0
         elif class_name == "Friendly":
+            print('friendly detected')
             class_id = 1
+        elif class_name == "Crosshair":
+            print('crosshair detected')
+            class_id = 2
 
         # Calculate normalized YOLO format values
         center_x = (x2 + x1) / 2
