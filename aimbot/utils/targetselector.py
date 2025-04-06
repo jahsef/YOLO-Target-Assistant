@@ -4,11 +4,15 @@ class TargetSelector:
     
     def __init__(self,
                  detection_window_dim : tuple[int,int],
-                #  x_offset : int,
-                #  y_offset: int,
                  head_toggle : bool,
                  target_cls_id,
-                 crosshair_cls_id
+                 crosshair_cls_id,
+                 max_deltas,
+                 sensitivity,
+                 height_thresholds = [420,69],
+                 height_offsets = [.25,.25,.25],
+                 screen_height = 1440,
+                 FOV = 105
                  ):
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         # self.x_offset = x_offset#offset needed because capture dim could be lower than real screen dim
@@ -17,8 +21,29 @@ class TargetSelector:
         self.target_cls_id = target_cls_id
         self.crosshair_cls_id = crosshair_cls_id
         # self.target_dimensions = target_dimensions
-        # self.target_region = [x_center - target_dimensions[0],y_center - target_dimensions[1],x_center + target_dimensions[0],y_center + target_dimensions[1]]#x +- target_dim[0]
-        #
+        self.max_deltas = max_deltas
+        self.height_thresholds = height_thresholds
+        self.height_offsets = height_offsets
+        self.sensitivity = sensitivity
+        self.DIST_CALC_CONST = 25000
+        self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
+        self.screen_height = screen_height
+        # self.FOV = FOV
+        self.vFOV = 2 * np.atan(np.tan(FOV / 2) * 9/16)
+    
+    def _get_predicted_distance(self,h,w):
+        a = h*w
+        dist = self.DIST_CALC_CONST/a
+        return dist
+    
+    def _estimate_bullet_drop(self,distance,speed):
+        """returns drop on screen representation"""
+        t = distance / speed
+        three_dim_drop = .5 * self.GRAVITY * t * t
+        #drop_in_screen = atan(drop / depth) * (screen_height / 2) / tan(vFOV / 2)
+        screen_drop = np.atan(three_dim_drop / distance) * (self.screen_height / 2) / np.tan(self.vFOV * (np.pi/180) / 2)
+        return screen_drop
+    
     def _get_head_offset(self,target):
         height = target[3] - target[1]
         # print(height)
@@ -32,7 +57,7 @@ class TargetSelector:
         return offset
         # print(f'returning: {target_center[0], target_center[1] - offset}')
         
-        #returns closest detection (sum of deltas not actual distance)
+    #returns closest detection (sum of deltas not actual distance)
     def _get_min_deltas(self,detections,crosshair,get_detection: bool = False,head_offsets = 0):
         x1, y1, x2, y2 = detections[:, 0], detections[:, 1], detections[:, 2], detections[:, 3]
         curr_centers_x = (x1 + x2) / 2
@@ -41,18 +66,24 @@ class TargetSelector:
         dy = curr_centers_y - crosshair[1]
         sum_deltas = np.abs(dx) + np.abs(dy)
         min_idx = np.argmin(sum_deltas)
+        
         if get_detection:
             return detections[min_idx]
         #returns deltas otherwise
-        deltas = (int(dx[min_idx]), int(dy[min_idx]))
-        return deltas
+        deltas = (int(dx[min_idx]) , int(dy[min_idx]))
+        if deltas[0] < self.max_deltas and deltas[1]< self.max_deltas:
+            return (deltas[0] * self.sensitivity, deltas[1] * self.sensitivity)
+        else:
+            return (0,0)
+    
     def return_deltas_vectorized(self,detections):
         cls_mask = detections[:,6] == self.target_cls_id
 
         if np.count_nonzero(cls_mask) != 0:
             enemy_detections = detections[cls_mask]
         else:
-            return None #no enemies 
+            return (0,0) #no enemies 
+        
         crosshair_mask = detections[:,6] == self.crosshair_cls_id
         crosshair = self.detection_window_center
         #if crosshair (red dots/scopes) is detected, get closest one
@@ -67,8 +98,8 @@ class TargetSelector:
         
         if self.head_toggle:
             offset_percentages = np.where(
-                heights > 85, 0.35,
-                np.where(heights > 25, 0.28, 0.20)
+                heights > self.height_thresholds[0], self.height_offsets[0],
+                np.where(heights > self.height_offsets[1], self.height_offsets[1], self.height_offsets[2])
             )
             head_offsets = (heights * offset_percentages)
         else:

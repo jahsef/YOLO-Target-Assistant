@@ -2,6 +2,8 @@ import cv2
 import os
 import imageio.v3 as iio
 import time
+from multiprocessing import Pool
+import multiprocessing
 
 class FPSTracker:
     def __init__(self, update_interval=5.0):
@@ -28,43 +30,64 @@ def crop_frame(image,crop_dim = (640,640)):
     image = image[crop_region[0]:crop_region[1], crop_region[2]:crop_region[3]]#h x w
     return image
 
-def extract_frames(video_path, output_folder, interval):
-    os.makedirs(output_folder, exist_ok=True)
-
-    cap = cv2.VideoCapture(video_path)#should probably use imageio for this but have to install more stuff
-    
+def process_frame(args):
+    video_path, frame_count, output_folder, base_name, crop_dim = args
+    # Each process opens its own VideoCapture instance.
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error: Unable to open video file {video_path}")
         return
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # Get total number of frames
-    total_extracted = total_frames // interval
-    print(f"Total frames: {total_frames}, total extracted: {total_extracted}, expected time@1.5fps: {(total_extracted / 1.5):.2f} s")
 
-    frame_count = 0
-    
-    counter = 0
-    fps_tracker = FPSTracker()
-    while frame_count < total_frames:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
-        success, frame = cap.read()
-        if success:
-            base_name = os.path.basename(os.path.splitext(video_path)[0])#os lib poop
-            ext = '.png'
-            frame_filename = os.path.join(output_folder, f"{base_name}{ext}") 
-            while os.path.exists(frame_filename):
-                frame_filename = os.path.join(output_folder, f"{base_name}({counter}){ext}")
-                counter += 1
-            frame = crop_frame(frame,crop_dim=(640,640))
-            cv2.imwrite(frame_filename, frame)
-            # iio.imwrite(frame_filename, frame, extension=".png")#imageio requires a bgr conversion since opencv bgr
-        frame_count += interval
-        fps_tracker.update()
-        
+    # Move to the required frame
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+    success, frame = cap.read()
     cap.release()
-    print(f"Frame extraction completed: {video_path}")
+    if not success:
+        print(f"Warning: Could not read frame {frame_count} from {video_path}")
+        return
 
-cwd = os.getcwd()#train\video_processing\
-list_videos = os.listdir(os.path.join(cwd, r'data_processing\videos_to_convert'))
+    # Crop the frame
+    frame = crop_frame(frame, crop_dim=crop_dim)
+    # Use a unique filename using the frame number (avoids collisions)
+    frame_filename = os.path.join(output_folder, f"{base_name}_{frame_count}.png")
+    cv2.imwrite(frame_filename, frame)
+    return frame_filename
+
+def extract_frames(video_path, output_folder, interval, num_workers=4, crop_dim=(640,640)):
+    start = time.perf_counter()
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Open video to get total frame count
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Unable to open video file {video_path}")
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    
+    total_extracted = total_frames // interval
+    print(f"Total frames: {total_frames}, total extracted: {total_extracted}, expected time@5fps: {(total_extracted / 5):.2f} s")
+    
+    base_name = os.path.basename(os.path.splitext(video_path)[0])
+    tasks = []
+    # Create a task for every frame we want to extract
+    for frame_count in range(0, total_frames, interval):
+        tasks.append((video_path, frame_count, output_folder, base_name, crop_dim))
+    
+    # Use a pool to run frame extraction in parallel
+    with Pool(processes=num_workers) as pool:
+        # This will block until all processes are finished
+        results = pool.map(process_frame, tasks)
+    
+    print(f"Frame extraction completed: {video_path}")
+    time_taken = time.perf_counter() - start
+    fps = (total_extracted / time_taken)
+    print(f'actual time:{(time_taken):.2f}, fps: {fps:.2f}')
+    
+
+
+
 
 def cum(video):
     print(f"Processing video: {video}")
@@ -76,7 +99,20 @@ def cum(video):
         interval=128 
     )
 if __name__ == '__main__':
-    from multiprocessing import Process
-    for video in list_videos:
+    cwd = os.getcwd()#train\video_processing\
+    # print(f"Processing video: {video}")
+
+    list_videos = os.listdir(os.path.join(cwd, r'data_processing\videos_to_convert'))
+    output_folder = os.path.join(cwd, r'data_processing\converted_videos')
+    for video_path in list_videos:
         # print(f'starting process for {video}')
-        Process(target = cum, args = (video,)).start()
+        # Process(target = cum, args = (video,)).start()
+        # cum(video)
+        video_path = os.path.join(cwd, r'data_processing\videos_to_convert', video_path)
+
+        extract_frames(
+            video_path=video_path,
+            output_folder=output_folder,
+            interval=84,
+            num_workers=6 
+        )

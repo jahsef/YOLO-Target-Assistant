@@ -7,8 +7,9 @@ import time
 
 cwd = Path.cwd()
 base_dir = 'datasets'
+#makes a new split dir copying contents from a presplit dir
 pre_split_dir = cwd / base_dir / 'pre_split_dataset'
-new_dir_name = "pf_600img"
+new_dir_name = "pf_1070img"
 split_dir = cwd / base_dir / new_dir_name#make sure no important data is here lol 
 
 pre_split_images_dir =     pre_split_dir / 'images' / 'train'
@@ -78,7 +79,7 @@ with open(pre_split_data_yaml_path, 'r') as f:
     data_yaml = yaml.safe_load(f)
 
 data_yaml['path'] = str(split_dir)#'.\\data\\' + new_dir_name
-data_yaml['flip_idx'] = [0]#num of keypoints, empty for 1 ig
+# data_yaml['flip_idx'] = [0]#num of keypoints, empty for 1 ig
 data_yaml['train'] = "images\\train"
 data_yaml['val'] = "images\\val"
 

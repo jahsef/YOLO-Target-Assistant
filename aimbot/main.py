@@ -27,14 +27,14 @@ from screeninfo import get_monitors
 
 class Main:
     def __init__(self):
-        self.debug = True
+        self.debug = False
         monitor = get_monitors()[0]#monitor num
         self.screen_x = monitor.width
         self.screen_y = monitor.height
-        self.target_cls_id = 0#make sure class is is correct\
+        self.target_cls_id = 0#make sure class id is correct\
         self.crosshair_cls_id = 2 #None if ur model dont support
-        base_dir = 'models/pf_600img_11n_tefps2/weights'
-        model_name = "best.pt" #"best.pt" "320x320_fp16True_stripped.engine"
+        base_dir = 'models/pf_1070img_11s/base_augment/weights'
+        model_name = "320x320_fp16True_stripped.engine" #"best.pt" "320x320_fp16True_stripped.engine"
         model_path = Path.cwd() / base_dir / model_name
         #hw_capture for engine format defined by engine file
         #not using yolo for loading engine they stink
@@ -45,9 +45,10 @@ class Main:
         self.y_offset = (self.screen_y - self.hw_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        # self.target_dimensions = self.hw_capture#aimbot window, dont really need
+        self.max_deltas = 16#max amount of pixels to start moving mouse (any more = no movement)
         self.setup_tracking()
-        self.setup_targeting()
+        self.setup_targeting(sensitivity= 1.25,height_thresholds=[50,25], height_offsets= [.33,.45,.65])
+        # self.setup_targeting(sensitivity= 1.2,height_thresholds=[80,35], height_offsets= [.35,.5,.75])
         if self.debug:
             window_height, window_width = self.hw_capture
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -91,7 +92,7 @@ class Main:
         finally:
             self.cleanup()
 
-    def load_model(self, model_path, hw_capture: tuple[int,int]):
+    def load_model(self, model_path, hw_capture = (640,640)):
         self.model_ext = model_path.suffix
         if self.model_ext == '.engine':
             self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, conf_threshold= .25,verbose = False)
@@ -102,10 +103,10 @@ class Main:
             self.hw_capture = hw_capture#can be set to whatever
             self.model = YOLO(model = model_path)
         else:
-            raise Exception(f'wrong file format dingus: {self.model_ext}')
+            raise Exception(f'not supported file format: {self.model_ext} <- file format should be here lol')
         
     def setup_tracking(self):
-        target_frame_rate = 144
+        target_frame_rate = 144#this doesnt really matter
         args = Namespace(
             track_high_thresh=.65,
             track_low_thresh=.4,
@@ -116,18 +117,17 @@ class Main:
         )
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
     
-    def setup_targeting(self):
+    def setup_targeting(self, sensitivity, height_thresholds, height_offsets):
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
-        # self.x_offset = (self.screen_x - self.hw_capture[1])//2
-        # self.y_offset = (self.screen_y - self.hw_capture[0])//2
-        
         self.target_selector = targetselector.TargetSelector(
             detection_window_dim=self.hw_capture,
-            # x_offset=self.x_offset,
-            # y_offset=self.y_offset,
             head_toggle=self.head_toggle,
             target_cls_id=self.target_cls_id,
-            crosshair_cls_id=self.crosshair_cls_id
+            crosshair_cls_id=self.crosshair_cls_id,
+            max_deltas = self.max_deltas,
+            sensitivity = sensitivity,
+            height_thresholds=  height_thresholds,
+            height_offsets = height_offsets
         )
             
     def cleanup(self):
@@ -139,11 +139,7 @@ class Main:
         torch.cuda.empty_cache()
         
     def aimbot(self, tracked_objects):  
-        # print(f'aimbot: {tracked_objects.shape}')
-        # print(tracked_objects)
-        # print('ambatu')
         deltas = self.target_selector.return_deltas_vectorized(tracked_objects)
-        # print(type(deltas))
         if deltas is not None:#if valid target
             self.move_mouse_to_bounding_box(deltas)
 
@@ -164,21 +160,8 @@ class Main:
             time.sleep(.1)
             
     def parse_results_into_boxes(self,results: torch.Tensor, orig_shape: tuple ):
-        #should probably make this work for both .engine and .pt
-        # Check if results are empty
-        
         if len(results) == 0:#xyxy, conf, cls, smth else?
             return Boxes(boxes=torch.empty((0, 6)), orig_shape=orig_shape)
-
-        # Filter results by class ID
-        # cls_mask = results[:, 5] == self.target_cls_id
-        # filtered_results = results[cls_mask] 
-
-        # If no boxes match the target class, return empty Boxes object
-        # if len(filtered_results) == 0:
-        #     return self.empty_boxes
-
-        # Construct Boxes object
         boxes = Boxes(
             boxes=results,  # Filtered results [x1, y1, x2, y2, conf, cls_id]
             orig_shape=orig_shape    # Original image dimensions (height, width)
@@ -236,10 +219,15 @@ class Main:
         
         for strack in stracks:
             x1, y1, x2, y2, = map(int,strack.xyxy)
-            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 2)
-            cv2.putText(display_frame, f"cls_id: {strack.cls}", (int(x1), int(y1) - 36),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"ID: {strack.track_id}", (int(x1), int(y1) - 24),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"nums_frames_seen: {strack.end_frame - strack.start_frame}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            if strack.cls == self.crosshair_cls_id:#if crosshair
+                cv2.circle(display_frame, ((x1 + x2) // 2, (y1 + y2) // 2),4, (0, 255, 0), -1)
+                cv2.putText(display_frame, f"score: {strack.score:.2f}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            else:
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 1)
+                cv2.putText(display_frame, f"score: {strack.score:.2f}", (int(x1), int(y1) - 48),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(display_frame, f"cls_id: {strack.cls}", (int(x1), int(y1) - 36),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(display_frame, f"ID: {strack.track_id}", (int(x1), int(y1) - 24),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(display_frame, f"nums_frames_seen: {strack.end_frame - strack.start_frame}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         if self.crosshair_cls_id:
             pass
         cv2.imshow("Screen Capture Detection", display_frame)
