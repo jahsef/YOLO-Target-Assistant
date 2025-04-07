@@ -1,82 +1,100 @@
 import numpy as np
+import math
 
 class TargetSelector:
     
-    def __init__(self,
-                 detection_window_dim : tuple[int,int],
-                 head_toggle : bool,
-                 target_cls_id,
-                 crosshair_cls_id,
-                 max_deltas,
-                 sensitivity,
-                 height_thresholds = [420,69],
-                 height_offsets = [.25,.25,.25],
-                 screen_height = 1440,
-                 FOV = 105
-                 ):
+    def __init__(
+            self,
+            detection_window_dim : tuple[int,int],
+            head_toggle : bool,
+            target_cls_id,
+            crosshair_cls_id,
+            max_deltas,
+            sensitivity,
+            zoom,
+            projectile_velocity = 2000,
+            base_head_offset = .33,
+            screen_height = 1440,
+            FOV = 105
+            ):
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
-        # self.x_offset = x_offset#offset needed because capture dim could be lower than real screen dim
-        # self.y_offset = y_offset
         self.head_toggle = head_toggle
         self.target_cls_id = target_cls_id
         self.crosshair_cls_id = crosshair_cls_id
-        # self.target_dimensions = target_dimensions
         self.max_deltas = max_deltas
-        self.height_thresholds = height_thresholds
-        self.height_offsets = height_offsets
         self.sensitivity = sensitivity
         self.DIST_CALC_CONST = 25000
         self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
         self.screen_height = screen_height
-        # self.FOV = FOV
-        self.vFOV = 2 * np.atan(np.tan(FOV / 2) * 9/16)
+        self.projectile_velocity = projectile_velocity
+        self.base_head_offset = base_head_offset
+        self.zoom = zoom
+        self.vertical_fov = 2 * np.atan(np.tan(FOV*np.pi/180 / 2) * 9/16)
+        print(self.vertical_fov)
+        self.distance_const =.73
     
-    def _get_predicted_distance(self,h,w):
-        a = h*w
-        dist = self.DIST_CALC_CONST/a
-        return dist
-    
-    def _estimate_bullet_drop(self,distance,speed):
-        """returns drop on screen representation"""
-        t = distance / speed
-        three_dim_drop = .5 * self.GRAVITY * t * t
-        #drop_in_screen = atan(drop / depth) * (screen_height / 2) / tan(vFOV / 2)
-        screen_drop = np.atan(three_dim_drop / distance) * (self.screen_height / 2) / np.tan(self.vFOV * (np.pi/180) / 2)
+
+    def _calculate_distance(self, target_height_pixels, target_real_height=5):
+        """
+        Calculate distance to target using angular size calculations
+        target_height_pixels: height of target in screen pixels
+        target_real_height: real-world height of target (e.g., 5m for vehicle)
+        """
+        # Account for zoom (perspective-correct scaling)
+        effective_fov = self.vertical_fov / self.zoom
+        pixels_per_radian = self.screen_height / effective_fov
+        
+        # Calculate angular size
+        angular_size_rad = target_height_pixels / pixels_per_radian
+        
+        # Base distance calculation
+        base_distance = target_real_height / (2 * math.tan(angular_size_rad / 2))
+        
+        # Apply distance constant and return
+        return base_distance * self.distance_const
+
+    def _calculate_bullet_drop(self, distance):
+        """
+        Calculate bullet drop in meters using physical projectile motion
+        """
+        time_of_flight = distance / self.projectile_velocity
+        drop = 0.5 * self.GRAVITY * (time_of_flight ** 2)
+        return drop
+
+    def _convert_to_screen_drop(self, real_drop, distance):
+        """
+        Convert real-world bullet drop to screen pixels
+        """
+
+        pixels_per_radian = self.screen_height / self.vertical_fov
+        angular_drop_rad = real_drop / distance
+        screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
     
-    def _get_head_offset(self,target):
-        height = target[3] - target[1]
-        # print(height)
-        if height > 85:  # Big target
-            offset_percentage = 0.35
-        elif height > 25:  # Medium target
-            offset_percentage = 0.28
-        else:  # Small target
-            offset_percentage = 0.15
-        offset = int(height * offset_percentage)
-        return offset
-        # print(f'returning: {target_center[0], target_center[1] - offset}')
-        
+    
     #returns closest detection (sum of deltas not actual distance)
-    def _get_min_deltas(self,detections,crosshair,get_detection: bool = False,head_offsets = 0):
-        x1, y1, x2, y2 = detections[:, 0], detections[:, 1], detections[:, 2], detections[:, 3]
+    def _get_closest_detection(self,detections,reference_point):
+        #reference point is center of screen for crosshair calculations
+        #reference point is crosshair if detected
+        x1, y1, x2, y2 = detections[:, 0], detections[:, 1], detections[:, 2] ,detections[:, 3]
         curr_centers_x = (x1 + x2) / 2
-        curr_centers_y = (y1 + y2) / 2 - head_offsets
-        dx = curr_centers_x - crosshair[0]
-        dy = curr_centers_y - crosshair[1]
+        curr_centers_y = (y1 + y2) / 2
+        dx = curr_centers_x - reference_point[0]
+        dy = curr_centers_y - reference_point[1]
         sum_deltas = np.abs(dx) + np.abs(dy)
         min_idx = np.argmin(sum_deltas)
+        return detections[min_idx]
         
-        if get_detection:
-            return detections[min_idx]
-        #returns deltas otherwise
-        deltas = (int(dx[min_idx]) , int(dy[min_idx]))
+    def _get_deltas(self,detection_xy,crosshair_xy):
+        x2,y2 = detection_xy[:]
+        x1,y1 = crosshair_xy[:]
+        deltas = (x2-x1 , y2-y1)
         if deltas[0] < self.max_deltas and deltas[1]< self.max_deltas:
-            return (deltas[0] * self.sensitivity, deltas[1] * self.sensitivity)
+            return (int(deltas[0]* self.sensitivity) , int(deltas[1] * self.sensitivity) )
         else:
             return (0,0)
-    
-    def return_deltas_vectorized(self,detections):
+        
+    def get_deltas(self,detections):
         cls_mask = detections[:,6] == self.target_cls_id
 
         if np.count_nonzero(cls_mask) != 0:
@@ -89,51 +107,41 @@ class TargetSelector:
         #if crosshair (red dots/scopes) is detected, get closest one
         if np.count_nonzero(crosshair_mask) != 0:
             crosshair_detections = detections[crosshair_mask]
-            closest_crosshair = self._get_min_deltas(crosshair_detections,crosshair,get_detection=True)
+            closest_crosshair = self._get_closest_detection(crosshair_detections,crosshair)
             x1,y1,x2,y2 = closest_crosshair[:4]
             crosshair = ((x1+x2)/2, (y1+y2)/2)  
-
-        x1, y1, x2, y2 = enemy_detections[:, 0], enemy_detections[:, 1], enemy_detections[:, 2], enemy_detections[:, 3]
-        heights = y2 - y1
+        # x1, y1, x2, y2 = enemy_detections[:, 0], enemy_detections[:, 1], enemy_detections[:, 2], enemy_detections[:, 3]
+        # heights = y2 - y1
         
+        closest_detection = self._get_closest_detection(enemy_detections,crosshair)
+        
+        #doesnt return true least mouse movement, just aims towards the closest enemy
+        x1, y1, x2, y2 = closest_detection[:4]
+        # print(closest_detection)
+        h = y2 - y1
+        w = x2 - x1
+        print(f'predicted,real,screen:')
+        predicted_dist = self._calculate_distance(h)
+        print(predicted_dist)
+        real_drop = self._calculate_bullet_drop(predicted_dist)
+        print(real_drop)
+        screen_drop = self._convert_to_screen_drop(real_drop,predicted_dist)
+        print(screen_drop)
+        # print(f'predicted dist: {predicted_dist}')
+        # pixel_drop = self._predict_bullet_drop(predicted_dist,self.projectile_velocity)
+        # print(f'predicted drop:{pixel_drop}')
         if self.head_toggle:
-            offset_percentages = np.where(
-                heights > self.height_thresholds[0], self.height_offsets[0],
-                np.where(heights > self.height_offsets[1], self.height_offsets[1], self.height_offsets[2])
-            )
-            head_offsets = (heights * offset_percentages)
+            pixel_head_offset = h * self.base_head_offset
+            # print(f'head_offset: {pixel_head_offset}')
         else:
-            head_offsets = 0
-
-        deltas = self._get_min_deltas(enemy_detections,crosshair,get_detection=False,head_offsets=head_offsets)
+            pixel_head_offset = 0
+        center_x = (x1+x2)/2
+        center_y = (y1+y2)/2  
+        # print(center_y)
+        offset_y = center_y - screen_drop - pixel_head_offset
+        # print(offset_y)
+        center_detection = (center_x, offset_y)
+        
+        deltas = self._get_deltas(center_detection,crosshair)
+        # print(deltas)
         return deltas
-    
-    # def return_deltas(self,detections:np.ndarray) -> tuple[int, int]:
-        
-    #     #returns the closest target thats also within the tracking region
-    #     shortest_dist =  float('inf')
-    #     target_deltas = None
-    #     # x1, y1, x2, y2 = detections[::0], detections[::1], detections[::2], detections[::3]
-        
-    #     for i, detection in enumerate(detections):
-    #         x1, y1, x2, y2 = detection[:4]
-    #         head_offset = 0
-    #         if self.head_toggle:
-    #             #slower to run this in here but like max 16 detections anyway
-    #             head_offset = self._get_head_offset(detection)
-                
-    #         curr_center = ((x1 + x2) / 2 + self.x_offset, 
-    #                     (y1 + y2) / 2 + self.y_offset - head_offset)
-    #         dx = curr_center[0] - self.screen_center[0]
-    #         dy = curr_center[1] - self.screen_center[1]
-    #         abs_dx, abs_dy = abs(dx), abs(dy)
-
-    #         sum_deltas = abs_dx + abs_dy
-    #         if sum_deltas < shortest_dist:
-    #             shortest_dist = sum_deltas
-    #             target_deltas = (dx,dy)
-
-                
-    #     # print(type(target_deltas))
-    #     # print(target_deltas)
-    #     return target_deltas if target_deltas else (0,0)

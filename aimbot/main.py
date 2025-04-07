@@ -27,17 +27,18 @@ from screeninfo import get_monitors
 
 class Main:
     def __init__(self):
-        self.debug = False
+        self.debug = True
         monitor = get_monitors()[0]#monitor num
         self.screen_x = monitor.width
         self.screen_y = monitor.height
         self.target_cls_id = 0#make sure class id is correct\
         self.crosshair_cls_id = 2 #None if ur model dont support
         base_dir = 'models/pf_1070img_11s/base_augment/weights'
-        model_name = "320x320_fp16True_stripped.engine" #"best.pt" "320x320_fp16True_stripped.engine"
+        # model_name = "320x320_fp16True_stripped.engine" #"best.pt" "320x320_fp16True_stripped.engine"
+        model_name = "best.pt"
         model_path = Path.cwd() / base_dir / model_name
         #hw_capture for engine format defined by engine file
-        #not using yolo for loading engine they stink
+        #not using yolo for loading engine they stinkyyyy
         self.load_model(model_path, hw_capture = (640,640))
         self.is_key_pressed = False
         self.screen_center = (self.screen_x // 2,self.screen_y // 2)
@@ -45,10 +46,9 @@ class Main:
         self.y_offset = (self.screen_y - self.hw_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.max_deltas = 16#max amount of pixels to start moving mouse (any more = no movement)
+        self.max_deltas = 15#max pixels to lock on
         self.setup_tracking()
-        self.setup_targeting(sensitivity= 1.25,height_thresholds=[50,25], height_offsets= [.33,.45,.65])
-        # self.setup_targeting(sensitivity= 1.2,height_thresholds=[80,35], height_offsets= [.35,.5,.75])
+        self.setup_targeting(sensitivity= 1.25,zoom =2.1,projectile_velocity = 2800,base_head_offset = .36, screen_height = self.screen_y)
         if self.debug:
             window_height, window_width = self.hw_capture
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -116,8 +116,8 @@ class Main:
             new_track_thresh=0.65
         )
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
-    
-    def setup_targeting(self, sensitivity, height_thresholds, height_offsets):
+    # (sensitivity= 1.25,projectile_velocity = 2500,base_head_offset = .33, screen_height = self.screen_y, FOV = 105)
+    def setup_targeting(self, sensitivity,zoom, projectile_velocity, base_head_offset,screen_height):
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
         self.target_selector = targetselector.TargetSelector(
             detection_window_dim=self.hw_capture,
@@ -126,8 +126,10 @@ class Main:
             crosshair_cls_id=self.crosshair_cls_id,
             max_deltas = self.max_deltas,
             sensitivity = sensitivity,
-            height_thresholds=  height_thresholds,
-            height_offsets = height_offsets
+            projectile_velocity=projectile_velocity,
+            base_head_offset=base_head_offset,
+            screen_height=screen_height,
+            zoom = zoom
         )
             
     def cleanup(self):
@@ -139,7 +141,7 @@ class Main:
         torch.cuda.empty_cache()
         
     def aimbot(self, tracked_objects):  
-        deltas = self.target_selector.return_deltas_vectorized(tracked_objects)
+        deltas = self.target_selector.get_deltas(tracked_objects)
         if deltas is not None:#if valid target
             self.move_mouse_to_bounding_box(deltas)
 
@@ -224,6 +226,8 @@ class Main:
                 cv2.putText(display_frame, f"score: {strack.score:.2f}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             else:
                 cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 1)
+                cv2.circle(display_frame, ((x1 + x2) // 2, (y1 + y2) // 2),4, (255, 0, 204), -1)
+                cv2.circle(display_frame, ((x1 + x2) // 2, (y1 + y2)// 2 - int((y2-y1)*.39)),4, (255, 0, 204), -1)
                 cv2.putText(display_frame, f"score: {strack.score:.2f}", (int(x1), int(y1) - 48),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 cv2.putText(display_frame, f"cls_id: {strack.cls}", (int(x1), int(y1) - 36),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 cv2.putText(display_frame, f"ID: {strack.track_id}", (int(x1), int(y1) - 24),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
