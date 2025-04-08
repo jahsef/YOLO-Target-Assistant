@@ -9,12 +9,12 @@ def main():
         
     # Define the paths to the dataset and YAML file
     cwd = os.getcwd()
-    data_yaml_path = os.path.join(cwd,'datasets/pf_1070img//data.yaml')  # Update with your data.yaml path
+    data_yaml_path = os.path.join(cwd,'datasets/pf_1600img//data.yaml')  # Update with your data.yaml path
     print(data_yaml_path)
     epochs = 100  # Adjust the number of epochs as needed
     batch = 8 # Adjust based on your GPU memory
     nbs = 8 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
-    imgsz = 640  # Image size for training
+    imgsz = 640  # Image size for training 
     
     # base_dir = 'models/EFPS_11n_4000img_640x640_batch16/weights'
     # model_name = "best.pt"
@@ -26,10 +26,10 @@ def main():
         epochs=epochs,  # Number of training epochs
         batch=batch,  # Batch size for training
         imgsz=imgsz,  # Image size for training
-        project='models/pf_1070img_11s',  # Directory to save the tra  ining results
+        project='models/pf_1600img_11s',  # Directory to save the tra  ining results
         resume = False,
         device = 0,
-        name='augment2',  # Directory name for the run
+        name='base_augment',  # Directory name for the run
         exist_ok=True,  # Overwrite the existing directory if necessary
         cache = 'disk',#takes in bool or string ig what
         patience = 16,#0 = no early stopping
@@ -47,8 +47,9 @@ def main():
         lr0 = 8e-5,
         augment = True,
         deterministic = False,
-        degrees = 5,
-        shear = 5,
+        weight_decay = 1e-3,#default 5e-4
+        # degrees = 5,
+        # shear = 5,
         # scale = .4,
         # perspective = 1e-4
     )

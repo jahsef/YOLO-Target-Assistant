@@ -37,7 +37,7 @@ def clear_directory(directory):
 
 clear_directory(labels_path)
 
-model = YOLO(os.path.join(os.getcwd(),"models/pf_1200img_11s/weights/best.pt"))
+model = YOLO(os.path.join(os.getcwd(),"models/pf_1070img_11s/base_augment/weights/best.pt"))
 def preprocess(frame: cp.ndarray) -> torch.Tensor:
     bchw = cp.ascontiguousarray(frame.transpose(2, 0, 1)[cp.newaxis, ...])
     float_frame = bchw.astype(cp.float16, copy=False)/255.0
@@ -62,7 +62,7 @@ def write_annotations(results, img_path):
     counters['total'] += 1
     boxes = results[0].boxes if results else []
     if len(boxes) == 0: 
-        if random.random() > 0.75:
+        if random.random() > .35:
             os.remove(img_path)
             counters['background'] += 1
             return
@@ -80,7 +80,7 @@ def write_annotations(results, img_path):
             counters['friendly_only'] += 1
             return
         
-    if all(box.conf[0] > 0.9 for box in boxes):#if all confidence is high
+    if all(box.conf[0] > 0.85 for box in boxes):#if all confidence is high
         os.remove(img_path)
         counters['high_conf'] += 1
         return

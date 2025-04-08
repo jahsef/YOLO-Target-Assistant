@@ -27,15 +27,15 @@ from screeninfo import get_monitors
 
 class Main:
     def __init__(self):
-        self.debug = True
+        self.debug = False
         monitor = get_monitors()[0]#monitor num
         self.screen_x = monitor.width
         self.screen_y = monitor.height
         self.target_cls_id = 0#make sure class id is correct\
         self.crosshair_cls_id = 2 #None if ur model dont support
-        base_dir = 'models/pf_1070img_11s/base_augment/weights'
-        # model_name = "320x320_fp16True_stripped.engine" #"best.pt" "320x320_fp16True_stripped.engine"
-        model_name = "best.pt"
+        base_dir = 'models/pf_1550img_11s/base_augment/weights'
+        model_name = "320x320_fp16True_stripped.engine" #"best.pt" "320x320_fp16True_stripped.engine"
+        # model_name = "best.pt"
         model_path = Path.cwd() / base_dir / model_name
         #hw_capture for engine format defined by engine file
         #not using yolo for loading engine they stinkyyyy
@@ -46,11 +46,11 @@ class Main:
         self.y_offset = (self.screen_y - self.hw_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.max_deltas = 15#max pixels to lock on
+        self.max_deltas = 32#max pixels to lock on
         self.setup_tracking()
-        self.setup_targeting(sensitivity= 1.25,zoom =2.1,projectile_velocity = 2800,base_head_offset = .36, screen_height = self.screen_y)
+        self.setup_targeting(sensitivity= .5,zoom =1.5,projectile_velocity = 2400,base_head_offset = .36)
         if self.debug:
-            window_height, window_width = self.hw_capture
+            window_height, window_width = self.hw_capture  
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
             
@@ -117,7 +117,7 @@ class Main:
         )
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
     # (sensitivity= 1.25,projectile_velocity = 2500,base_head_offset = .33, screen_height = self.screen_y, FOV = 105)
-    def setup_targeting(self, sensitivity,zoom, projectile_velocity, base_head_offset,screen_height):
+    def setup_targeting(self, sensitivity,zoom, projectile_velocity, base_head_offset):
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
         self.target_selector = targetselector.TargetSelector(
             detection_window_dim=self.hw_capture,
@@ -128,7 +128,7 @@ class Main:
             sensitivity = sensitivity,
             projectile_velocity=projectile_velocity,
             base_head_offset=base_head_offset,
-            screen_height=screen_height,
+            screen_hw= (self.screen_y,self.screen_x),
             zoom = zoom
         )
             

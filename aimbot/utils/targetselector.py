@@ -14,8 +14,8 @@ class TargetSelector:
             zoom,
             projectile_velocity = 2000,
             base_head_offset = .33,
-            screen_height = 1440,
-            FOV = 105
+            screen_hw = (1440,2560),
+            hFOV_degrees = 105
             ):
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         self.head_toggle = head_toggle
@@ -23,36 +23,74 @@ class TargetSelector:
         self.crosshair_cls_id = crosshair_cls_id
         self.max_deltas = max_deltas
         self.sensitivity = sensitivity
-        self.DIST_CALC_CONST = 25000
+        # self.DIST_CALC_CONST = 25000
         self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
-        self.screen_height = screen_height
+        self.screen_height = screen_hw[0]
+        self.screen_width = screen_hw[1]
         self.projectile_velocity = projectile_velocity
         self.base_head_offset = base_head_offset
         self.zoom = zoom
-        self.vertical_fov = 2 * np.atan(np.tan(FOV*np.pi/180 / 2) * 9/16)
-        print(self.vertical_fov)
-        self.distance_const =.73
+        
+        self.hfov_rad = np.deg2rad(hFOV_degrees)
+        self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
+        print(f'hfov: {np.rad2deg(self.hfov_rad)}')
+        print(f'vfov: {np.rad2deg(self.vfov_rad)}')
+        self.DISTANCE_CONST =.5
+
+    def _calculate_distance(self, target_height_pixels=None, target_real_height=5,
+                            target_width_pixels=None, target_real_width=3.5):
+        """
+        Enhanced distance calculator with partial visibility handling
+        """
+        # Default human proportions (height/width ratio)
+        EXPECTED_RATIO = target_real_height / target_real_width  # ~3.4 for humans
+        HEAD_RATIO_THRESHOLD = 0.4 * EXPECTED_RATIO  # Threshold for head detection
+        
+        distances = []
+        weights = []
+        use_head_dimensions = False
+
+        # Detect partial visibility using aspect ratio
+        if target_height_pixels and target_width_pixels:
+            actual_ratio = target_height_pixels / target_width_pixels
+            
+            # Check for head-like proportions
+            if actual_ratio < HEAD_RATIO_THRESHOLD:
+                use_head_dimensions = True
+                target_real_height = 0.25  # Average head height
+                target_real_width = 0.3    # Average head width
+
+        # Height-based calculation
+        if target_height_pixels and target_real_height:
+            eff_vert_fov = self.vfov_rad * (1/self.zoom)
+            px_per_rad = self.screen_height / eff_vert_fov
+            angular_size = target_height_pixels / px_per_rad
+            dist = target_real_height / (2 * math.tan(angular_size/2))
+            distances.append(dist)
+            weights.append(0.4 if use_head_dimensions else 0.6)
+
+        # Width-based calculation
+        if target_width_pixels and target_real_width:
+            eff_horiz_fov = self.hfov_rad * (1/self.zoom)
+            px_per_rad = self.screen_width / eff_horiz_fov
+            angular_size = target_width_pixels / px_per_rad
+            dist = target_real_width / (2 * math.tan(angular_size/2))
+            distances.append(dist)
+            weights.append(0.6 if use_head_dimensions else 0.4)
+
+        if not distances:
+            raise ValueError("Provide at least one valid dimension")
+
+        # Final distance calculation
+        if len(distances) == 2:
+            # Prioritize width when head-like proportions detected
+            base_distance = (distances[0]*weights[0] + distances[1]*weights[1]) / sum(weights)
+        else:
+            base_distance = distances[0]
+
+        return base_distance * self.DISTANCE_CONST
     
-
-    def _calculate_distance(self, target_height_pixels, target_real_height=5):
-        """
-        Calculate distance to target using angular size calculations
-        target_height_pixels: height of target in screen pixels
-        target_real_height: real-world height of target (e.g., 5m for vehicle)
-        """
-        # Account for zoom (perspective-correct scaling)
-        effective_fov = self.vertical_fov / self.zoom
-        pixels_per_radian = self.screen_height / effective_fov
-        
-        # Calculate angular size
-        angular_size_rad = target_height_pixels / pixels_per_radian
-        
-        # Base distance calculation
-        base_distance = target_real_height / (2 * math.tan(angular_size_rad / 2))
-        
-        # Apply distance constant and return
-        return base_distance * self.distance_const
-
+    
     def _calculate_bullet_drop(self, distance):
         """
         Calculate bullet drop in meters using physical projectile motion
@@ -66,7 +104,7 @@ class TargetSelector:
         Convert real-world bullet drop to screen pixels
         """
 
-        pixels_per_radian = self.screen_height / self.vertical_fov
+        pixels_per_radian = self.screen_height / self.vfov_rad
         angular_drop_rad = real_drop / distance
         screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
@@ -89,7 +127,7 @@ class TargetSelector:
         x2,y2 = detection_xy[:]
         x1,y1 = crosshair_xy[:]
         deltas = (x2-x1 , y2-y1)
-        if deltas[0] < self.max_deltas and deltas[1]< self.max_deltas:
+        if abs(deltas[0]) < self.max_deltas and abs(deltas[1])< self.max_deltas:
             return (int(deltas[0]* self.sensitivity) , int(deltas[1] * self.sensitivity) )
         else:
             return (0,0)
@@ -120,16 +158,17 @@ class TargetSelector:
         # print(closest_detection)
         h = y2 - y1
         w = x2 - x1
-        print(f'predicted,real,screen:')
-        predicted_dist = self._calculate_distance(h)
-        print(predicted_dist)
+        # print(f'predicted,real,screen:')
+        predicted_dist = self._calculate_distance(target_height_pixels=h, target_width_pixels=w)
+        # print(predicted_dist)
         real_drop = self._calculate_bullet_drop(predicted_dist)
-        print(real_drop)
+        # print(real_drop)
         screen_drop = self._convert_to_screen_drop(real_drop,predicted_dist)
-        print(screen_drop)
+        # print(screen_drop)
         # print(f'predicted dist: {predicted_dist}')
         # pixel_drop = self._predict_bullet_drop(predicted_dist,self.projectile_velocity)
-        # print(f'predicted drop:{pixel_drop}')
+        # print(f'predicted 3d drop:{real_drop}')
+        # print(f'predicted screen drop:{screen_drop}')
         if self.head_toggle:
             pixel_head_offset = h * self.base_head_offset
             # print(f'head_offset: {pixel_head_offset}')
@@ -145,3 +184,11 @@ class TargetSelector:
         deltas = self._get_deltas(center_detection,crosshair)
         # print(deltas)
         return deltas
+
+
+if __name__ == '__main__':#test
+    ts = TargetSelector(detection_window_dim=(320,320),head_toggle=True,target_cls_id=0,crosshair_cls_id=2,
+                        max_deltas = 16,sensitivity=1,zoom=10,projectile_velocity=2000,base_head_offset=.33,screen_hw=(1440,2560),hFOV_degrees=105)
+    dist = ts._calculate_distance(target_height_pixels=207,target_width_pixels=97)
+    print(dist)
+    
