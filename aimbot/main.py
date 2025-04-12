@@ -46,9 +46,11 @@ class Main:
         self.y_offset = (self.screen_y - self.hw_capture[0])//2
         self.fps_tracker = FPSTracker()
         self.head_toggle = True
-        self.max_deltas = 32#max pixels to lock on
+        self.max_deltas = 64#max pixels to lock on
         self.setup_tracking()
-        self.setup_targeting(sensitivity= .5,zoom =1.5,projectile_velocity = 2400,base_head_offset = .36)
+        self.setup_targeting(sensitivity= .25,zoom =1.5,projectile_velocity = 2500,base_head_offset = .36,
+                             fov= 80, sens_std_dev = .15)#fov isnt actually 80, thats the fov for 1x zoom
+        #sens std dev is for a mult of the sens, mean is 1D
         if self.debug:
             window_height, window_width = self.hw_capture  
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -117,7 +119,7 @@ class Main:
         )
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
     # (sensitivity= 1.25,projectile_velocity = 2500,base_head_offset = .33, screen_height = self.screen_y, FOV = 105)
-    def setup_targeting(self, sensitivity,zoom, projectile_velocity, base_head_offset):
+    def setup_targeting(self, sensitivity,zoom, projectile_velocity, base_head_offset,fov,sens_std_dev):
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
         self.target_selector = targetselector.TargetSelector(
             detection_window_dim=self.hw_capture,
@@ -129,7 +131,9 @@ class Main:
             projectile_velocity=projectile_velocity,
             base_head_offset=base_head_offset,
             screen_hw= (self.screen_y,self.screen_x),
-            zoom = zoom
+            zoom = zoom,
+            hFOV_degrees= fov,
+            sens_std_dev= sens_std_dev
         )
             
     def cleanup(self):

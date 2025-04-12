@@ -1,5 +1,6 @@
 import numpy as np
 import math
+import random
 
 class TargetSelector:
     
@@ -15,7 +16,8 @@ class TargetSelector:
             projectile_velocity = 2000,
             base_head_offset = .33,
             screen_hw = (1440,2560),
-            hFOV_degrees = 105
+            hFOV_degrees = 80,
+            sens_std_dev = .05
             ):
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         self.head_toggle = head_toggle
@@ -23,6 +25,7 @@ class TargetSelector:
         self.crosshair_cls_id = crosshair_cls_id
         self.max_deltas = max_deltas
         self.sensitivity = sensitivity
+        self.min_sensitivity = sensitivity * .1
         # self.DIST_CALC_CONST = 25000
         self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
         self.screen_height = screen_hw[0]
@@ -30,12 +33,12 @@ class TargetSelector:
         self.projectile_velocity = projectile_velocity
         self.base_head_offset = base_head_offset
         self.zoom = zoom
-        
+        self.sens_std_dev = sens_std_dev
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
         print(f'hfov: {np.rad2deg(self.hfov_rad)}')
         print(f'vfov: {np.rad2deg(self.vfov_rad)}')
-        self.DISTANCE_CONST =.5
+        self.DISTANCE_CONST =.45
 
     def _calculate_distance(self, target_height_pixels=None, target_real_height=5,
                             target_width_pixels=None, target_real_width=3.5):
@@ -109,7 +112,13 @@ class TargetSelector:
         screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
     
-    
+    def _scale_input(self, delta):
+        #the farther away it is the less it flicks
+        ratio = 1 - min(delta / self.max_deltas, 1)
+        sensitivity = self.min_sensitivity + (self.sensitivity - self.min_sensitivity) * ratio
+        rand_val = random.gauss(mu = 1, sigma = self.sens_std_dev)
+        return delta * sensitivity * rand_val
+
     #returns closest detection (sum of deltas not actual distance)
     def _get_closest_detection(self,detections,reference_point):
         #reference point is center of screen for crosshair calculations
@@ -128,7 +137,9 @@ class TargetSelector:
         x1,y1 = crosshair_xy[:]
         deltas = (x2-x1 , y2-y1)
         if abs(deltas[0]) < self.max_deltas and abs(deltas[1])< self.max_deltas:
-            return (int(deltas[0]* self.sensitivity) , int(deltas[1] * self.sensitivity) )
+            scaled_x = self._scale_input(deltas[0])
+            scaled_y = self._scale_input(deltas[1])
+            return (round(scaled_x) , round(scaled_y))
         else:
             return (0,0)
         
