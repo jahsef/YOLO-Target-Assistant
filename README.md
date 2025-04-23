@@ -36,7 +36,7 @@ BettererCam (custom BetterCam fork)
 
 Tested at 320x320, 220 FPS on RTX 3080
 
-Achieved 220 FPS on RTX 3070 was also achieved with lower monitor resolutions
+Achieved 220 FPS on RTX 3070 with lower monitor resolutions
 
 📷 Demo
 
