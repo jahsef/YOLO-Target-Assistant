@@ -1,6 +1,8 @@
 import numpy as np
 import math
 import random
+import time
+from ultralytics.trackers.byte_tracker import STrack
 
 class TargetSelector:
     
@@ -12,12 +14,15 @@ class TargetSelector:
             crosshair_cls_id,
             max_deltas,
             sensitivity,
+            rand_sens_mult_std_dev,
+            min_sens_mult,
             zoom,
-            projectile_velocity = 2000,
+            projectile_velocity,
             base_head_offset = .33,
             screen_hw = (1440,2560),
             hFOV_degrees = 80,
-            sens_std_dev = .05
+            predict_drop = False,
+            predict_crosshair = False
             ):
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         self.head_toggle = head_toggle
@@ -25,80 +30,65 @@ class TargetSelector:
         self.crosshair_cls_id = crosshair_cls_id
         self.max_deltas = max_deltas
         self.sensitivity = sensitivity
-        self.min_sensitivity = sensitivity * .1
-        # self.DIST_CALC_CONST = 25000
+        self.min_sensitivity = sensitivity * min_sens_mult
         self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
         self.screen_height = screen_hw[0]
         self.screen_width = screen_hw[1]
         self.projectile_velocity = projectile_velocity
         self.base_head_offset = base_head_offset
+        self.predict_drop = predict_drop
+        self.predict_crosshair = predict_crosshair
         self.zoom = zoom
-        self.sens_std_dev = sens_std_dev
+        self.sens_std_dev = rand_sens_mult_std_dev
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
-        print(f'hfov: {np.rad2deg(self.hfov_rad)}')
-        print(f'vfov: {np.rad2deg(self.vfov_rad)}')
-        self.DISTANCE_CONST =.45
+        self.DISTANCE_CONST =.475#calibration const
+        self.debug = False
 
-    def _calculate_distance(self, target_height_pixels=None, target_real_height=5,
-                            target_width_pixels=None, target_real_width=3.5):
+
+    def _calculate_distance(self, target_height_pixels = None, target_real_height=5,
+                            target_width_pixels= None, target_real_width=3.5):
         """
-        Enhanced distance calculator with partial visibility handling
+        Robust distance calculation with perspective-safe head detection and weighted uncertainty.
         """
-        # Default human proportions (height/width ratio)
-        EXPECTED_RATIO = target_real_height / target_real_width  # ~3.4 for humans
-        HEAD_RATIO_THRESHOLD = 0.4 * EXPECTED_RATIO  # Threshold for head detection
-        
         distances = []
-        weights = []
-        use_head_dimensions = False
+        variances = []
+        
 
-        # Detect partial visibility using aspect ratio
-        if target_height_pixels and target_width_pixels:
-            actual_ratio = target_height_pixels / target_width_pixels
-            
-            # Check for head-like proportions
-            if actual_ratio < HEAD_RATIO_THRESHOLD:
-                use_head_dimensions = True
-                target_real_height = 0.25  # Average head height
-                target_real_width = 0.3    # Average head width
+        eff_vert_fov = self.vfov_rad / self.zoom  # More intuitive than 1/zoom
+        eff_horiz_fov = self.hfov_rad / self.zoom
 
-        # Height-based calculation
+        # 4. Height-based calculation with uncertainty weighting
         if target_height_pixels and target_real_height:
-            eff_vert_fov = self.vfov_rad * (1/self.zoom)
             px_per_rad = self.screen_height / eff_vert_fov
             angular_size = target_height_pixels / px_per_rad
-            dist = target_real_height / (2 * math.tan(angular_size/2))
+            dist = target_real_height / (2 * math.tan(angular_size / 2))
             distances.append(dist)
-            weights.append(0.4 if use_head_dimensions else 0.6)
+            # Weight by inverse square of angular size (smaller = less reliable)
+            variances.append(angular_size ** 2)
 
-        # Width-based calculation
+        # 5. Width-based calculation (same logic)
         if target_width_pixels and target_real_width:
-            eff_horiz_fov = self.hfov_rad * (1/self.zoom)
             px_per_rad = self.screen_width / eff_horiz_fov
             angular_size = target_width_pixels / px_per_rad
-            dist = target_real_width / (2 * math.tan(angular_size/2))
+            dist = target_real_width / (2 * math.tan(angular_size / 2))
             distances.append(dist)
-            weights.append(0.6 if use_head_dimensions else 0.4)
+            variances.append(angular_size ** 2)
 
-        if not distances:
-            raise ValueError("Provide at least one valid dimension")
+        # 6. Physics-based weighting instead of magic numbers
+        weights = [1/v for v in variances] if len(variances) == 2 else [1]
+        weighted_distance = sum(d * w for d, w in zip(distances, weights)) / sum(weights)
 
-        # Final distance calculation
-        if len(distances) == 2:
-            # Prioritize width when head-like proportions detected
-            base_distance = (distances[0]*weights[0] + distances[1]*weights[1]) / sum(weights)
-        else:
-            base_distance = distances[0]
-
-        return base_distance * self.DISTANCE_CONST
+        return weighted_distance * self.DISTANCE_CONST  # Document this as "calibration factor"
     
+    def _calculate_travel_time(self, delta_x):
+        time_of_flight = delta_x / self.projectile_velocity
+        return time_of_flight
     
-    def _calculate_bullet_drop(self, distance):
+    def _calculate_bullet_drop(self, time_of_flight):
         """
         Calculate bullet drop in meters using physical projectile motion
         """
-        time_of_flight = distance / self.projectile_velocity
         drop = 0.5 * self.GRAVITY * (time_of_flight ** 2)
         return drop
 
@@ -111,19 +101,27 @@ class TargetSelector:
         angular_drop_rad = real_drop / distance
         screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
-    
+
     def _scale_input(self, delta):
-        #the farther away it is the less it flicks
+        """
+        applies linear sensitivity scaling with randomness
+        
+        if deltas higher, sens is lower, reduces flicking severity
+        """
         ratio = 1 - min(delta / self.max_deltas, 1)
         sensitivity = self.min_sensitivity + (self.sensitivity - self.min_sensitivity) * ratio
-        rand_val = random.gauss(mu = 1, sigma = self.sens_std_dev)
-        return delta * sensitivity * rand_val
+        rand_scaling = random.gauss(mu = 1, sigma = self.sens_std_dev)
+        return delta * sensitivity * rand_scaling
 
-    #returns closest detection (sum of deltas not actual distance)
-    def _get_closest_detection(self,detections,reference_point):
-        #reference point is center of screen for crosshair calculations
-        #reference point is crosshair if detected
-        x1, y1, x2, y2 = detections[:, 0], detections[:, 1], detections[:, 2] ,detections[:, 3]
+
+    def _get_closest_detection(self,detections:np.ndarray,reference_point:tuple[int,int]) -> tuple:
+        """
+        returns the closest detection to a given reference point, which is a crosshair or the center of the screen
+        """
+        
+        xyxy_arr = detections[:,:4]
+        #needs to be transposed, this tries to unpack row wise, so x1 would try to get the first row xyxy
+        x1, y1, x2, y2 = xyxy_arr[:, 0:4].T
         curr_centers_x = (x1 + x2) / 2
         curr_centers_y = (y1 + y2) / 2
         dx = curr_centers_x - reference_point[0]
@@ -143,63 +141,67 @@ class TargetSelector:
         else:
             return (0,0)
         
-    def get_deltas(self,detections):
+    def _get_crosshair(self,detections:np.ndarray) -> tuple[int,int]:
+        crosshair = self.detection_window_center
+        if self.predict_crosshair:
+            crosshair_mask = detections[:,6]  == self.crosshair_cls_id
+            #if crosshair (red dots/scopes) is detected, get closest one
+            if np.count_nonzero(crosshair_mask) != 0:
+                crosshair_detections = detections[crosshair_mask]
+                closest_crosshair = self._get_closest_detection(crosshair_detections,crosshair)
+                x1,y1,x2,y2 = closest_crosshair[:4] #xywh returns center_x, center_y, width height
+                crosshair = ((x1+x2)//2, (y1+y2)//2)  
+        return crosshair
+            
+    def get_deltas(self,detections:np.ndarray):
+        """
+        processes detection array of shape (n, 8) where columns are:
+        
+        [x1, y1, x2, y2, track_id, confidence, class_id, not_sure_what_this_is_idx]
+        """
         cls_mask = detections[:,6] == self.target_cls_id
-
-        if np.count_nonzero(cls_mask) != 0:
-            enemy_detections = detections[cls_mask]
+        if np.count_nonzero(cls_mask) != 0:#checking if any targets exist
+            enemy_strack_results = detections[cls_mask]
         else:
             return (0,0) #no enemies 
+
         
-        crosshair_mask = detections[:,6] == self.crosshair_cls_id
-        crosshair = self.detection_window_center
-        #if crosshair (red dots/scopes) is detected, get closest one
-        if np.count_nonzero(crosshair_mask) != 0:
-            crosshair_detections = detections[crosshair_mask]
-            closest_crosshair = self._get_closest_detection(crosshair_detections,crosshair)
-            x1,y1,x2,y2 = closest_crosshair[:4]
-            crosshair = ((x1+x2)/2, (y1+y2)/2)  
-        # x1, y1, x2, y2 = enemy_detections[:, 0], enemy_detections[:, 1], enemy_detections[:, 2], enemy_detections[:, 3]
-        # heights = y2 - y1
+        crosshair = self._get_crosshair(detections)    
         
-        closest_detection = self._get_closest_detection(enemy_detections,crosshair)
-        
-        #doesnt return true least mouse movement, just aims towards the closest enemy
-        x1, y1, x2, y2 = closest_detection[:4]
-        # print(closest_detection)
-        h = y2 - y1
+        closest_enemy_detection = self._get_closest_detection(enemy_strack_results,crosshair)
+
+        x1,y1,x2,y2 = closest_enemy_detection[:4]
         w = x2 - x1
-        # print(f'predicted,real,screen:')
-        predicted_dist = self._calculate_distance(target_height_pixels=h, target_width_pixels=w)
-        # print(predicted_dist)
-        real_drop = self._calculate_bullet_drop(predicted_dist)
-        # print(real_drop)
-        screen_drop = self._convert_to_screen_drop(real_drop,predicted_dist)
-        # print(screen_drop)
-        # print(f'predicted dist: {predicted_dist}')
-        # pixel_drop = self._predict_bullet_drop(predicted_dist,self.projectile_velocity)
-        # print(f'predicted 3d drop:{real_drop}')
-        # print(f'predicted screen drop:{screen_drop}')
-        if self.head_toggle:
-            pixel_head_offset = h * self.base_head_offset
-            # print(f'head_offset: {pixel_head_offset}')
-        else:
-            pixel_head_offset = 0
-        center_x = (x1+x2)/2
-        center_y = (y1+y2)/2  
-        # print(center_y)
-        offset_y = center_y - screen_drop - pixel_head_offset
-        # print(offset_y)
-        center_detection = (center_x, offset_y)
+        h = y2 - y1
+        aim_x = (x1+x2)/2
+        aim_y = (y1+y2)/2
         
-        deltas = self._get_deltas(center_detection,crosshair)
-        # print(deltas)
+        if self.head_toggle:
+            aim_y -= h * self.base_head_offset
+            
+        if self.predict_drop:
+            predicted_dist = self._calculate_distance(target_height_pixels=h, target_width_pixels=w)
+            predicted_bullet_travel_time = self._calculate_travel_time(predicted_dist)
+            real_drop = self._calculate_bullet_drop(predicted_bullet_travel_time)
+            screen_drop = self._convert_to_screen_drop(real_drop,predicted_dist)
+            aim_y -= screen_drop
+        
+        aim_xy = (aim_x, aim_y)
+        deltas = self._get_deltas(aim_xy,crosshair)
+
+        if self.debug:
+            print(f'\npredicted dist: {predicted_dist}')
+            print(f'predicted bullet travel time: {predicted_bullet_travel_time}')
+            print(f'predicted screen drop:{screen_drop}')
+            print(f'aim_xy: {aim_xy}')
+            print(f'deltas: {deltas}')
+
         return deltas
 
 
 if __name__ == '__main__':#test
     ts = TargetSelector(detection_window_dim=(320,320),head_toggle=True,target_cls_id=0,crosshair_cls_id=2,
-                        max_deltas = 16,sensitivity=1,zoom=10,projectile_velocity=2000,base_head_offset=.33,screen_hw=(1440,2560),hFOV_degrees=105)
+                        max_deltas = 16,sensitivity=1,zoom=10,projectile_velocity=2000,base_head_offset=.33,screen_hw=(1440,2560),hFOV_degrees=105, rand_sens_mult_std_dev=0, min_sens_mult=0)
     dist = ts._calculate_distance(target_height_pixels=207,target_width_pixels=97)
     print(dist)
     

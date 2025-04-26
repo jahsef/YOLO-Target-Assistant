@@ -9,7 +9,7 @@ cwd = Path.cwd()
 base_dir = 'datasets'
 #makes a new split dir copying contents from a presplit dir
 pre_split_dir = cwd / base_dir / 'pre_split_dataset'
-new_dir_name = "pf_1550img"
+new_dir_name = "pf_delta_test"
 split_dir = cwd / base_dir / new_dir_name#make sure no important data is here lol 
 
 pre_split_images_dir =     pre_split_dir / 'images' / 'train'

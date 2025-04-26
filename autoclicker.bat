@@ -1,0 +1,1 @@
+python "aimbot/utils/auto_clicker.py"

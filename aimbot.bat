@@ -1,0 +1,1 @@
+python "aimbot/aimbot.py"

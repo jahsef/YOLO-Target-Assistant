@@ -89,15 +89,16 @@ def extract_frames(video_path, output_folder, interval, num_workers=4, crop_dim=
 
 
 
-def cum(video):
-    print(f"Processing video: {video}")
-    video_path = os.path.join(cwd, r'data_processing\videos_to_convert', video)
-    output_folder = os.path.join(cwd, r'data_processing\converted_videos')
-    extract_frames(
-        video_path=video_path,
-        output_folder=output_folder,
-        interval=128 
-    )
+# def cum(video):
+#     print(f"Processing video: {video}")
+#     video_path = os.path.join(cwd, r'data_processing\videos_to_convert', video)
+#     output_folder = os.path.join(cwd, r'data_processing\converted_videos')
+#     extract_frames(
+#         video_path=video_path,
+#         output_folder=output_folder,
+#         interval=128 
+#     )
+    
 if __name__ == '__main__':
     cwd = os.getcwd()#train\video_processing\
     # print(f"Processing video: {video}")
@@ -113,6 +114,6 @@ if __name__ == '__main__':
         extract_frames(
             video_path=video_path,
             output_folder=output_folder,
-            interval=84,
+            interval=180,
             num_workers=6 
         )
