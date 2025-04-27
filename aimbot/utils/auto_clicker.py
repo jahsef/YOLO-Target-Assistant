@@ -6,7 +6,7 @@ from pynput import mouse
 from pynput.mouse import Button
 
 class MouseClicker:
-    def __init__(self):
+    def __init__(self,cpm):
         self.clicking = False
         self.listener = None
         self.click_thread = None
@@ -15,7 +15,7 @@ class MouseClicker:
         
         # More game-friendly settings
         self.click_duration = 0.01  # 10ms hold time
-        self.clicks_per_minute = 900 * .95
+        self.clicks_per_minute = cpm
         self.clicks_per_second = self.clicks_per_minute / 60
         self.click_interval = 1 / self.clicks_per_second
 
@@ -53,8 +53,12 @@ class MouseClicker:
             print(f"Permission error: Try running as Administrator")
             
 if __name__ == "__main__":
+    print('default button is mouse back, hold down')
+    print('clicks per min should be *.95 if game has click speed caps')
+    print('eval func in code')
+    print('enter desired clicks per min:')
+    input_cpm = float(eval(input()))
     print("Press Ctrl+C to exit.")
     
-    clicker = MouseClicker()
-    print(f'cpm: {clicker.clicks_per_minute}')
+    clicker = MouseClicker(input_cpm)
     clicker.start()

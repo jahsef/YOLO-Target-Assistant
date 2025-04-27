@@ -27,61 +27,21 @@ from screeninfo import get_monitors
 class Aimbot:
     def __init__(self):
         import json
-        from pathlib import Path
-        config_path = Path(__file__).parent / "aimbot_config.json"
+        config_path = Path.cwd() / "aimbot_config.json"
         with open(config_path) as f:
             cfg = json.load(f)
-        
-        #bool for debug
         self.debug = cfg['debug']
-        
-        #model cfg
         model_path = Path.cwd() / cfg['model']['base_dir'] / cfg['model']['name']
         pt_hw_capture = tuple(cfg['model']['hw_capture'])
         #hw_capture is only used for pt models, engine models load it themselves
         self.load_model(model_path, hw_capture=pt_hw_capture)
+        self.load_monitor_settings()
+        self.load_targeting_cfg(cfg)
 
-        sens = cfg['sensitivity_settings']['sens']
-        rand_sens_mult_std_dev = cfg['sensitivity_settings']['rand_sens_mult_std_dev']
-        min_sens_mult = cfg['sensitivity_settings']['min_sens_mult']
-        self.max_deltas = cfg['sensitivity_settings']['max_deltas']
-
-        self.target_cls_id = cfg['targeting_settings']['target_cls_id']
-        self.crosshair_cls_id = cfg['targeting_settings']['crosshair_cls_id']
-        self.head_toggle = cfg['targeting_settings']['head_toggle']
-        predict_drop = cfg['targeting_settings']['predict_drop']
-        predict_crosshair = cfg['targeting_settings']['predict_crosshair']
-        zoom = cfg['targeting_settings']['zoom']
-        projectile_velocity = cfg['targeting_settings']['projectile_velocity']
-        base_head_offset = cfg['targeting_settings']['base_head_offset']
-        fov = cfg['targeting_settings']['fov']
-        
-        #dynamic monitor settings
-        monitor = get_monitors()[0]
-        self.screen_x = monitor.width
-        self.screen_y = monitor.height
-        self.screen_center = (self.screen_x // 2, self.screen_y // 2)
-        self.x_offset = (self.screen_x - self.hw_capture[1]) // 2
-        self.y_offset = (self.screen_y - self.hw_capture[0]) // 2
-
-        
         self.is_key_pressed = False
         self.fps_tracker = FPSTracker()
-        self.setup_tracking()
-        self.setup_targeting(
-            sens=sens,
-            rand_sens_mult_std_dev=rand_sens_mult_std_dev,
-            min_sens_mult=min_sens_mult,
-            predict_drop=predict_drop,
-            predict_crosshair=predict_crosshair,
-            zoom=zoom,
-            projectile_velocity=projectile_velocity,
-            base_head_offset=base_head_offset,
-            fov=fov
-        )
-        
+        self.setup_tracker()
 
-        
         if self.debug:
             window_height, window_width = self.hw_capture  
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -128,7 +88,53 @@ class Aimbot:
             print('Shutting down...')
         finally:
             self.cleanup()
-
+            
+    def load_monitor_settings(self):
+        #dynamic monitor settings
+        monitor = get_monitors()[0]
+        self.screen_x = monitor.width
+        self.screen_y = monitor.height
+        self.screen_center = (self.screen_x // 2, self.screen_y // 2)
+        self.x_offset = (self.screen_x - self.hw_capture[1]) // 2
+        self.y_offset = (self.screen_y - self.hw_capture[0]) // 2
+        
+    def load_targeting_cfg(self,cfg:dict):
+        #sens settings
+        sens = cfg['sensitivity_settings']['sens']
+        rand_sens_mult_std_dev = cfg['sensitivity_settings']['rand_sens_mult_std_dev']
+        min_sens_mult = cfg['sensitivity_settings']['min_sens_mult']
+        max_deltas = cfg['sensitivity_settings']['max_deltas']
+        #targeting/ bullet prediction settings
+        #need self scope for debug stuff below
+        self.target_cls_id = cfg['targeting_settings']['target_cls_id']
+        self.crosshair_cls_id = cfg['targeting_settings']['crosshair_cls_id']
+        head_toggle = cfg['targeting_settings']['head_toggle']
+        predict_drop = cfg['targeting_settings']['predict_drop']
+        predict_crosshair = cfg['targeting_settings']['predict_crosshair']
+        zoom = cfg['targeting_settings']['zoom']
+        projectile_velocity = cfg['targeting_settings']['projectile_velocity']
+        base_head_offset = cfg['targeting_settings']['base_head_offset']
+        fov = cfg['targeting_settings']['fov']
+        
+        self.target_selector = targetselector.TargetSelector(
+            detection_window_dim=self.hw_capture,
+            head_toggle=head_toggle,
+            target_cls_id=self.target_cls_id,
+            crosshair_cls_id=self.crosshair_cls_id,
+            max_deltas = max_deltas,
+            sensitivity = sens,
+            projectile_velocity=projectile_velocity,
+            base_head_offset=base_head_offset,
+            screen_hw= (self.screen_y,self.screen_x),
+            zoom = zoom,
+            hFOV_degrees= fov,
+            rand_sens_mult_std_dev= rand_sens_mult_std_dev,
+            predict_drop=predict_drop,
+            min_sens_mult=min_sens_mult,
+            predict_crosshair = predict_crosshair
+        )
+        
+        
     def load_model(self, model_path: Path, hw_capture = (640,640)):
         self.model_ext = model_path.suffix
         if self.model_ext == '.engine':
@@ -142,7 +148,7 @@ class Aimbot:
         else:
             raise Exception(f'not supported file format: {self.model_ext} <- file format should be here lol')
         
-    def setup_tracking(self):
+    def setup_tracker(self):
         #if engine is running just going to assume 144 is the target frame rate
         #if pt model is running its probably debug screen as well so 30
         target_frame_rate = 144 if self.model_ext == ".engine" else 30
@@ -156,28 +162,6 @@ class Aimbot:
         )
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
 
-    def setup_targeting(self, sens,rand_sens_mult_std_dev,min_sens_mult,#std_dev and min_sens_mult are multipliers
-                            #below settings are only used if predict_drop == True
-                            predict_drop,predict_crosshair, zoom,projectile_velocity,base_head_offset,fov):
-        self.screen_center = (self.screen_x // 2, self.screen_y // 2)
-        self.target_selector = targetselector.TargetSelector(
-            detection_window_dim=self.hw_capture,
-            head_toggle=self.head_toggle,
-            target_cls_id=self.target_cls_id,
-            crosshair_cls_id=self.crosshair_cls_id,
-            max_deltas = self.max_deltas,
-            sensitivity = sens,
-            projectile_velocity=projectile_velocity,
-            base_head_offset=base_head_offset,
-            screen_hw= (self.screen_y,self.screen_x),
-            zoom = zoom,
-            hFOV_degrees= fov,
-            rand_sens_mult_std_dev= rand_sens_mult_std_dev,
-            predict_drop=predict_drop,
-            min_sens_mult=min_sens_mult,
-            predict_crosshair = predict_crosshair
-        )
-            
     def cleanup(self):
         if self.camera:
             self.camera.release()
@@ -219,24 +203,23 @@ class Aimbot:
     
     #almost 25% speedup over np (preprocess + inference)
     #also python doesnt have method overloading by parameter type
-    def preprocess_tensorrt(self,frame: cp.ndarray) -> cp.ndarray:
+    def _preprocess_frame(self,frame:cp.ndarray) -> cp.ndarray:
         bchw = frame.transpose(2, 0, 1)[cp.newaxis, ...]
         float_frame = bchw.astype(cp.float32, copy=False)#engine expects float 32 unless i export it differently
         float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-        return cp.ascontiguousarray(float_frame)
+        return float_frame
+    
+    def preprocess_tensorrt(self,frame: cp.ndarray) -> cp.ndarray:
+        return cp.ascontiguousarray(self._preprocess_frame(frame))
 
     def inference_tensorrt(self,src:cp.ndarray) -> np.ndarray:
         results = self.model.inference_cp(src = src)
-        results = torch.as_tensor(results)#should be pretty inexpensive since it references the same 
+        results = torch.as_tensor(results)#should be pretty inexpensive since it references the same memory
         results = self.parse_results_into_boxes(results, self.hw_capture)
         return self.tracker.update(results.cpu().numpy())
-        # return results
         
     def preprocess_torch(self,frame: cp.ndarray) -> torch.Tensor:
-        bchw = frame.transpose(2, 0, 1)[cp.newaxis, ...]
-        float_frame = bchw.astype(cp.float32, copy=False)
-        float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-        return torch.as_tensor(float_frame).contiguous()   
+        return torch.as_tensor(self._preprocess_frame(frame)).contiguous()   
     
     @torch.inference_mode()
     def inference_torch(self,source:torch.Tensor) -> np.ndarray:
@@ -250,8 +233,6 @@ class Aimbot:
 
         return self.tracker.update(results[0].boxes.cpu().numpy())
 
-
-    
     def debug_render(self,frame):
         display_frame = cp.asnumpy(frame)
         stracks = [x for x in self.tracker.tracked_stracks if x.is_activated]#not sure if activated is needed
@@ -273,8 +254,6 @@ class Aimbot:
 
         cv2.imshow("Screen Capture Detection", display_frame)
         cv2.waitKey(1)
-        
-
 
 class FPSTracker:
     def __init__(self, update_interval=10.0):
@@ -291,9 +270,6 @@ class FPSTracker:
             print(f'FPS: {fps:.2f}')
             self.frame_count = 0
             self.last_update = current_time
-
-
-            
 
 if __name__ == "__main__":
     Aimbot().main()
