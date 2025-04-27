@@ -9,20 +9,21 @@ class TargetSelector:
     def __init__(
             self,
             detection_window_dim : tuple[int,int],
+            screen_hw:tuple[int,int],
             head_toggle : bool,
-            target_cls_id,
-            crosshair_cls_id,
-            max_deltas,
-            sensitivity,
-            rand_sens_mult_std_dev,
-            min_sens_mult,
-            zoom,
-            projectile_velocity,
-            base_head_offset = .33,
-            screen_hw = (1440,2560),
-            hFOV_degrees = 80,
-            predict_drop = False,
-            predict_crosshair = False
+            base_head_offset:float,
+            target_cls_id: int,
+            crosshair_cls_id: int,
+            max_deltas: int,
+            sensitivity: float,
+            rand_sens_mult_std_dev: float,
+            min_sens_mult: float,
+            predict_drop:bool,
+            predict_crosshair:bool,
+            zoom:float,
+            projectile_velocity:float,
+            hFOV_degrees:float
+ 
             ):
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         self.head_toggle = head_toggle

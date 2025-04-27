@@ -1,5 +1,5 @@
 {
-    "debug": true,
+    "debug": false,
     "model": {
         "base_dir": "models/pf_1550img_11s/weights",
         "name": "320x320_fp16True_stripped.engine",
@@ -11,16 +11,15 @@
         "rand_sens_mult_std_dev": 0.05,
         "min_sens_mult": 0.05
     },
-
     "targeting_settings": {
         "target_cls_id": 0,
         "crosshair_cls_id": 2,
         "head_toggle" : true,
-        "predict_crosshair": true,
+        "predict_crosshair": false,
         "predict_drop": true,
-        "zoom": 1.7,
-        "projectile_velocity": 2500,
-        "base_head_offset": 0.36,
+        "zoom": 1.5,
+        "projectile_velocity": 900,
+        "base_head_offset": 0.33,
         "fov": 80
     }
 

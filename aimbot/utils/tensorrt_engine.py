@@ -10,11 +10,20 @@ import cupy as cp
 
 class TensorRT_Engine:
     def __init__(self,engine_file_path:str, conf_threshold:float,verbose:bool = False):
+        
         self.TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE) if verbose else trt.Logger(trt.Logger.INFO)
         self.engine = self._load_engine(engine_file_path)
         self.context = self.engine.create_execution_context()
-        self.input_tensor_name = self.engine.get_tensor_name(0)#assuming first tensor is input
-        self.output_tensor_name = self.engine.get_tensor_name(1)
+
+        #now explicitly defines input instead of assuming first idx is input tensor
+        self.input_tensor_name = None
+        self.output_tensor_name = None
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                self.input_tensor_name = name
+            else:
+                self.output_tensor_name = name
         # print(input_tensor_size)
         
         # time.sleep(10)
@@ -27,47 +36,43 @@ class TensorRT_Engine:
         print(f'engine imgsz: {self.imgsz}')
         self.input_dtype = self.engine.get_tensor_dtype(self.input_tensor_name)
         self.output_dtype = self.engine.get_tensor_dtype(self.output_tensor_name)
+        
+
+        
         #could do float
         # cp_input_dtype = cp.dtype(trt.nptype(self.input_dtype))
         # cp_output_dtype = cp.dtype(trt.nptype(self.output_dtype))
         # print(cp_input_dtype)
         # print(cp_output_dtype)
         self._alloc_output_tensor()
+        
+        
+        
 
-    def _load_engine(self,engine_file_path:str):
-        assert os.path.exists(engine_file_path)
-        print(f"Reading engine from {engine_file_path}")
-        with open(engine_file_path, "rb") as f, trt.Runtime(self.TRT_LOGGER) as runtime:
+        
+    def _load_engine(self, engine_file_path: str) -> trt.ICudaEngine:
+        print(f'Reading engine file from: {engine_file_path}')
+        with open(engine_file_path, "rb") as f:
+            runtime = trt.Runtime(self.TRT_LOGGER)
             return runtime.deserialize_cuda_engine(f.read())
 
     def inference_cp(self, src: cp.ndarray) -> cp.ndarray:
         """
         src needs to be a contiguous array in bchw
         
-        also needs batch size 1, returns parsed results without batch dim and without low conf things
+        also needs batch size 1, dynamic batch size is slow and this is for real time inference
+        
+        returns parsed results without batch dim and without low conf things
         """
 
-        #probably dont even need error checking here but why not
-        # if src.data.ptr == 0:
-        #     raise ValueError("Input tensor has an invalid address")
-        
-        if src.dtype != cp.float32:
-            raise Exception("input for tenssort engine != float 32, engine expects that")
-            # input_data = input_data.astype(cp.float32)
-            
-            
-        # try:
-        self.context.set_tensor_address(self.input_tensor_name, src.data.ptr)
-            # self.context.set_tensor_address(self.output_tensor_name, self.output_ptr)
-        # except Exception as e:
-        #     raise RuntimeError(f"Failed to set tensor address: {e}")
+        if not (src.flags.c_contiguous and src.shape == self.input_shape):
+            src = cp.ascontiguousarray(src.astype(self.input_dtype))
 
-        # self.context.set_tensor_address(self.input_tensor_name, input_data.data.ptr)
+        self.context.set_tensor_address(self.input_tensor_name, src.data.ptr)
         self.context.execute_async_v3(self.stream.ptr)
 
         self.stream.synchronize()
-        # Return the output buffer (no need to create a new array)
-        # return self.output_buffer
+
         return self._parse_cp_results()
 
     def _parse_cp_results(self):
@@ -78,24 +83,42 @@ class TensorRT_Engine:
         # print(filtered_results.shape)
         return filtered_results
     
+    # def _parse_cp_results(self):
+    #     # Skip reshape if possible
+    #     # output = self.output_buffer.reshape(-1, 6)  # Only if needed
+        
+    #     # GPU-accelerated thresholding
+    #     valid_ids = cp.where(self.output_buffer[:, 4] > self.conf_threshold)[0]
+    #     return self.output_buffer[valid_ids]
+    
     def _alloc_output_tensor(self):
         self.output_buffer = cp.empty(self.output_shape, dtype=trt.nptype(self.output_dtype))
         self.output_ptr = self.output_buffer.data.ptr
         self.context.set_tensor_address(self.output_tensor_name, self.output_ptr)
-                
+        
+    def __del__(self):
+        # Explicit cleanup for CUDA resources
+        if hasattr(self, 'context'):
+            del self.context
+        if hasattr(self, 'engine'):
+            del self.engine
+        if hasattr(self, 'stream'):
+            self.stream.synchronize()
+            del self.stream      
+                   
 if __name__ == '__main__':
     import torch
     import cv2
     import time
     torch.cuda.empty_cache()
     cwd = os.getcwd()
-    base_dir = "models/EFPS_11n_4000img_640x640_batch16/weights"
-    engine_name = "320x320_fp16True_stripped.engine"
+    base_dir = "models/EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights"
+    engine_name = "320x320_stripped.engine"
     model_path = os.path.join(cwd, base_dir, engine_name)
     imgsz = (320,320)
     model = TensorRT_Engine(model_path,conf_threshold= 0, verbose = True)
 
-    img_path = os.path.join(cwd, 'datasets/EFPS_4000img_640x640/images/train/frame_0(1).jpg')
+    img_path = os.path.join(cwd, 'datasets/EFPS_4000img_640x640/images/train/frame_13.jpg')
     img = cv2.imread(img_path)
     img = cv2.resize(img, imgsz[::-1]) 
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
@@ -117,8 +140,8 @@ if __name__ == '__main__':
         cp_img = cp.asarray(np_img) 
         # print(cp_img.data.ptr)
         output = model.inference_cp(cp_img)
-    #     print("Output shape:", output.shape)
-    #     print(output)
+        # print("Output shape:", output.shape)
+        print(output)
         # output = None
         # cp_img = None
 
