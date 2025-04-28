@@ -43,44 +43,63 @@ class TargetSelector:
         self.sens_std_dev = rand_sens_mult_std_dev
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
-        self.DISTANCE_CONST =.475#calibration const
+        self.DISTANCE_CONST =0.51#calibration const
         self.debug = False
 
 
-    def _calculate_distance(self, target_height_pixels = None, target_real_height=5,
-                            target_width_pixels= None, target_real_width=3.5):
+    def _calculate_distance(self, target_height_pixels=None, target_real_height=5,
+                            target_width_pixels=None, target_real_width=3.5):
         """
-        Robust distance calculation with perspective-safe head detection and weighted uncertainty.
+        Improved distance calculation with error-aware weighting and stability checks
         """
         distances = []
-        variances = []
+        weights = []
         
-
-        eff_vert_fov = self.vfov_rad / self.zoom  # More intuitive than 1/zoom
+        eff_vert_fov = self.vfov_rad / self.zoom
         eff_horiz_fov = self.hfov_rad / self.zoom
+        min_angular_size = math.radians(0.3)  # ~0.3 degree minimum (about 5 pixels on 1080p)
 
-        # 4. Height-based calculation with uncertainty weighting
+        # Height-based calculation
         if target_height_pixels and target_real_height:
             px_per_rad = self.screen_height / eff_vert_fov
             angular_size = target_height_pixels / px_per_rad
-            dist = target_real_height / (2 * math.tan(angular_size / 2))
-            distances.append(dist)
-            # Weight by inverse square of angular size (smaller = less reliable)
-            variances.append(angular_size ** 2)
+            angular_size = max(angular_size, min_angular_size)
+            
+            try:
+                dist = target_real_height / (2 * math.tan(angular_size / 2))
+                # Weight by angular size squared (favors larger/more certain measurements)
+                weight = (angular_size ** 2) + 1e-6  # Avoid zero division
+                distances.append(dist)
+                weights.append(weight)
+            except ZeroDivisionError:
+                pass
 
-        # 5. Width-based calculation (same logic)
+        # Width-based calculation
         if target_width_pixels and target_real_width:
             px_per_rad = self.screen_width / eff_horiz_fov
             angular_size = target_width_pixels / px_per_rad
-            dist = target_real_width / (2 * math.tan(angular_size / 2))
-            distances.append(dist)
-            variances.append(angular_size ** 2)
+            angular_size = max(angular_size, min_angular_size)
+            
+            try:
+                dist = target_real_width / (2 * math.tan(angular_size / 2))
+                weight = (angular_size ** 2) + 1e-6
+                distances.append(dist)
+                weights.append(weight)
+            except ZeroDivisionError:
+                pass
 
-        # 6. Physics-based weighting instead of magic numbers
-        weights = [1/v for v in variances] if len(variances) == 2 else [1]
-        weighted_distance = sum(d * w for d, w in zip(distances, weights)) / sum(weights)
+        # Fallback if no valid measurements
+        if not distances:
+            return 0.0  # Or appropriate default
 
-        return weighted_distance * self.DISTANCE_CONST  # Document this as "calibration factor"
+        # Geometric mean is more stable for disparate measurements
+        combined_distance = math.exp(sum(w * math.log(d) for w, d in zip(weights, distances)) / sum(weights))
+        
+        # Optional: Add maximum distance sanity check (adjust based on your scenario)
+        max_reasonable_distance = 400  
+        combined_distance = min(combined_distance, max_reasonable_distance)
+        
+        return combined_distance * self.DISTANCE_CONST
     
     def _calculate_travel_time(self, delta_x):
         time_of_flight = delta_x / self.projectile_velocity

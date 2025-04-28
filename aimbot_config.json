@@ -6,20 +6,20 @@
         "hw_capture": [640, 640]
     },
     "sensitivity_settings": {
-        "max_deltas": 72,
-        "sens": 0.25,
-        "rand_sens_mult_std_dev": 0.05,
-        "min_sens_mult": 0.05
+        "max_deltas": 120,
+        "sens": 1.5,
+        "rand_sens_mult_std_dev": 0,
+        "min_sens_mult": 1
     },
     "targeting_settings": {
         "target_cls_id": 0,
         "crosshair_cls_id": 2,
         "head_toggle" : true,
         "predict_crosshair": false,
-        "predict_drop": true,
-        "zoom": 1.5,
-        "projectile_velocity": 900,
-        "base_head_offset": 0.33,
+        "predict_drop": false,
+        "zoom": 2,
+        "projectile_velocity": 1050,
+        "base_head_offset": 0.35,
         "fov": 80
     }
 
