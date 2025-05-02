@@ -1,30 +1,33 @@
 {
     "debug": false,
     "model": {
-        "base_dir": "models/EFPS_4000img_11n/weights",
+        "base_dir": "models/pf_1550img_11s/weights",
         "name": "320x320_stripped.engine",
         "hw_capture": [640, 640]
     },
     "sensitivity_settings": {
         "max_deltas": 120,
-        "overall_sens": 0.75,
+        "overall_sens": 0.45,
         "sens_scaling": 0.225,
-        "jitter_strength": 0.0,
-        "overshoot_strength": 0.0,
-        "overshoot_chance": 0.0
-
+        "jitter_strength": 0.1,
+        "overshoot_strength": 0.1,
+        "overshoot_chance": 0.1
 
     },
     "targeting_settings": {
         "target_cls_id": 0,
         "crosshair_cls_id": 2,
         "head_toggle" : true,
-        "predict_crosshair": false,
-        "predict_drop": false,
+        "predict_crosshair": true,
+        "predict_drop": true,
         "zoom": 3,
         "projectile_velocity": 3000,
         "base_head_offset": 0.35,
         "fov": 80
+    },
+    "gui_settings":{
+        "opencv_render": false,
+        "dpg_overlay": false
     }
 
   }

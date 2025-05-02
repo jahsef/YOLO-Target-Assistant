@@ -9,18 +9,18 @@ def main():
         
     # Define the paths to the dataset and YAML file
     cwd = os.getcwd()
-    data_yaml_path = os.path.join(cwd,'datasets/pf_delta_test//data.yaml')  # Update with your data.yaml path
+    data_yaml_path = os.path.join(cwd,'datasets/pf_1550img//data.yaml')  # Update with your data.yaml path
     print(data_yaml_path)
     epochs = 100  # Adjust the number of epochs as needed
-    batch = 3 # Adjust based on your GPU memory
-    nbs = 3 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
+    batch = 8 # Adjust based on your GPU memory
+    nbs = 8 #nominal/effective batch size, updates gradients every 4 iterations (24/6)
     imgsz = 640  # Image size for training 
     
-    base_dir = 'models/pf_1550img_11s/weights'
-    model_name = "best.pt"
-    model_path = os.path.join(os.getcwd(), base_dir, model_name)
-    model = YOLO(model_path)
-    # model = YOLO("yolo11s.pt")  # Use the YOLOv8 pre-trained weights or your own
+    # base_dir = 'models/pf_1550img_11s/weights'
+    # model_name = "best.pt"
+    # model_path = os.path.join(os.getcwd(), base_dir, model_name)
+    # model = YOLO(model_path)
+    model = YOLO("yolo11n.pt")  # Use the YOLOv8 pre-trained weights or your own
     model.train(
         data=data_yaml_path,  # Path to your dataset configuration file
         epochs=epochs,  # Number of training epochs
@@ -29,10 +29,10 @@ def main():
         project='models',  # Directory to save the tra  ining results
         resume = False,
         device = 0,
-        name='pf_delta_test',  # Directory name for the run
+        name='pf_1550img_11n',  # Directory name for the run
         exist_ok=True,  # Overwrite the existing directory if necessary
         cache = 'disk',#takes in bool or string ig what
-        patience = 24,#0 = no early stopping
+        patience = 20,#0 = no early stopping
         rect = False, #may need to experiment with this, default False
         save_period = 5,
         fraction = 1,#fraction of train

@@ -137,7 +137,7 @@ class TargetSelector:
         """
         processes detection array of shape (n, 8) where columns are:
         
-        [x1, y1, x2, y2, track_id, confidence, class_id, not_sure_what_this_is_idx]
+        [x1, y1, x2, y2, track_id, confidence, class_id, Strack idx]
         """
         cls_mask = detections[:,6] == self.target_cls_id
         if np.count_nonzero(cls_mask) != 0:#checking if any targets exist

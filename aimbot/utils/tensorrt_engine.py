@@ -112,7 +112,7 @@ if __name__ == '__main__':
     import time
     torch.cuda.empty_cache()
     cwd = os.getcwd()
-    base_dir = "models/EFPS_4000img_11s_retrain_1440p_batch6_epoch200/weights"
+    base_dir = "models/EFPS_4000img_11s/weights"
     engine_name = "320x320_stripped.engine"
     model_path = os.path.join(cwd, base_dir, engine_name)
     imgsz = (320,320)
