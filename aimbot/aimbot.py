@@ -19,10 +19,12 @@ sys.path.insert(0, str(github_dir / 'Betterercam'))
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 # print(betterercam.__file__)
-from utils import targetselector, tensorrt_engine
+from utils import targetselector, tensorrt_engine, mousemover
 from argparse import Namespace  
 from screeninfo import get_monitors
 
+from pynput import mouse
+from pynput.mouse import Button
 
 class Aimbot:
     def __init__(self):
@@ -38,10 +40,15 @@ class Aimbot:
         self.load_monitor_settings()
         self.load_targeting_cfg(cfg)
 
-        self.is_key_pressed = False
+        self.is_rmb_pressed = False
+        self.activation_button = mouse.Button.right
+        self.listener = None
+        self.listener_thread = None
+        
         self.fps_tracker = FPSTracker()
         self.setup_tracker()
-
+        self.mousemover = mousemover.MouseMover(self.overall_sens,self.sens_scaling,self.max_deltas,self.jitter_strength,self.overshoot_strength,self.overshoot_chance)
+        
         if self.debug:
             window_height, window_width = self.hw_capture  
             cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
@@ -52,10 +59,13 @@ class Aimbot:
         
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
         self.camera = betterercam.create(region = capture_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)
+        
+        
         #if using yolo inference need to use BGR since they assume your input is BGR
         
     def main(self):     
-        threading.Thread(target=self.input_detection, daemon=True).start()
+        # threading.Thread(target=self.input_detection, daemon=True).start()
+        self.start_input_detection()
         
         try:
             while True:
@@ -80,7 +90,7 @@ class Aimbot:
                     display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
                     self.debug_render(display_frame)
                 
-                if self.is_key_pressed and len(tracked_detections) > 0:
+                if self.is_rmb_pressed and len(tracked_detections) > 0:
                     self.aimbot(tracked_detections)
                     
                 self.fps_tracker.update()
@@ -100,10 +110,12 @@ class Aimbot:
         
     def load_targeting_cfg(self,cfg:dict):
         #sens settings
-        sens = cfg['sensitivity_settings']['sens']
-        rand_sens_mult_std_dev = cfg['sensitivity_settings']['rand_sens_mult_std_dev']
-        min_sens_mult = cfg['sensitivity_settings']['min_sens_mult']
-        max_deltas = cfg['sensitivity_settings']['max_deltas']
+        self.overall_sens = cfg['sensitivity_settings']['overall_sens']
+        self.sens_scaling = cfg['sensitivity_settings']['sens_scaling']
+        self.max_deltas = cfg['sensitivity_settings']['max_deltas']
+        self.jitter_strength = cfg['sensitivity_settings']['jitter_strength']
+        self.overshoot_strength = cfg['sensitivity_settings']['overshoot_strength']
+        self.overshoot_chance = cfg['sensitivity_settings']['overshoot_chance']
         #targeting/ bullet prediction settings
         #need self scope for debug stuff below
         self.target_cls_id = cfg['targeting_settings']['target_cls_id']
@@ -121,16 +133,13 @@ class Aimbot:
             head_toggle=head_toggle,
             target_cls_id=self.target_cls_id,
             crosshair_cls_id=self.crosshair_cls_id,
-            max_deltas = max_deltas,
-            sensitivity = sens,
+            max_deltas = self.max_deltas,
             projectile_velocity=projectile_velocity,
             base_head_offset=base_head_offset,
             screen_hw= (self.screen_y,self.screen_x),
             zoom = zoom,
             hFOV_degrees= fov,
-            rand_sens_mult_std_dev= rand_sens_mult_std_dev,
             predict_drop=predict_drop,
-            min_sens_mult=min_sens_mult,
             predict_crosshair = predict_crosshair
         )
         
@@ -172,25 +181,30 @@ class Aimbot:
         
     def aimbot(self, detections):  
         deltas = self.target_selector.get_deltas(detections)
-        if deltas is not None:#if valid target
-            self.move_mouse_to_bounding_box(deltas)
+        if deltas != (0,0):#if valid target
+            self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
+            
+    def on_click(self, x, y, button, pressed):
+        """Callback for mouse clicks (thread-safe)."""
+        if button == self.activation_button:
+            self.is_rmb_pressed = pressed
+            if self.debug:
+                print('Pressed' if pressed else 'Released')
 
-    def move_mouse_to_bounding_box(self, deltas):
-        delta_x = deltas[0]
-        delta_y = deltas[1]
-        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
-            
-    def input_detection(self):
-        #SHOULD ADD A ZOOM TOGGLE THING
-        def on_key_press(event):
-            if event.name.lower() == 'y':
-                self.is_key_pressed = not self.is_key_pressed
-                print(f"Key toggled: {self.is_key_pressed}")
-                
-        keyboard.on_press(on_key_press)
-        while True:#keeps thread alive
-            time.sleep(.1)
-            
+    def start_input_detection(self):
+        """Start the listener in a daemon thread (non-blocking)."""
+        if self.listener_thread and self.listener_thread.is_alive():
+            return  # Already running
+
+        self.listener = mouse.Listener(on_click=self.on_click)
+        self.listener_thread = threading.Thread(
+            target=self.listener.start, 
+            daemon=True  # Kills thread when main program exits
+        )
+        self.listener_thread.start()
+        print("Input listener started in background.")        
+
+
     def parse_results_into_boxes(self,results: torch.Tensor, img_sz: tuple ) -> Boxes:
         #need to convert into boxes to pass into the ultralytics BYTETracker
         if len(results) == 0:#xyxy, conf, cls, smth else?
@@ -256,7 +270,7 @@ class Aimbot:
         cv2.waitKey(1)
 
 class FPSTracker:
-    def __init__(self, update_interval=10.0):
+    def __init__(self, update_interval=16):
         self.frame_count = 0
         self.last_update = time.perf_counter()
         self.update_interval = update_interval

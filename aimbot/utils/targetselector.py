@@ -1,8 +1,5 @@
 import numpy as np
 import math
-import random
-import time
-from ultralytics.trackers.byte_tracker import STrack
 
 class TargetSelector:
     
@@ -15,9 +12,6 @@ class TargetSelector:
             target_cls_id: int,
             crosshair_cls_id: int,
             max_deltas: int,
-            sensitivity: float,
-            rand_sens_mult_std_dev: float,
-            min_sens_mult: float,
             predict_drop:bool,
             predict_crosshair:bool,
             zoom:float,
@@ -30,8 +24,6 @@ class TargetSelector:
         self.target_cls_id = target_cls_id
         self.crosshair_cls_id = crosshair_cls_id
         self.max_deltas = max_deltas
-        self.sensitivity = sensitivity
-        self.min_sensitivity = sensitivity * min_sens_mult
         self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
         self.screen_height = screen_hw[0]
         self.screen_width = screen_hw[1]
@@ -40,7 +32,6 @@ class TargetSelector:
         self.predict_drop = predict_drop
         self.predict_crosshair = predict_crosshair
         self.zoom = zoom
-        self.sens_std_dev = rand_sens_mult_std_dev
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
         self.DISTANCE_CONST =.475#calibration const
@@ -103,17 +94,6 @@ class TargetSelector:
         screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
 
-    def _scale_input(self, delta):
-        """
-        applies linear sensitivity scaling with randomness
-        
-        if deltas higher, sens is lower, reduces flicking severity
-        """
-        ratio = 1 - min(delta / self.max_deltas, 1)
-        sensitivity = self.min_sensitivity + (self.sensitivity - self.min_sensitivity) * ratio
-        rand_scaling = random.gauss(mu = 1, sigma = self.sens_std_dev)
-        return delta * sensitivity * rand_scaling
-
 
     def _get_closest_detection(self,detections:np.ndarray,reference_point:tuple[int,int]) -> tuple:
         """
@@ -136,9 +116,8 @@ class TargetSelector:
         x1,y1 = crosshair_xy[:]
         deltas = (x2-x1 , y2-y1)
         if abs(deltas[0]) < self.max_deltas and abs(deltas[1])< self.max_deltas:
-            scaled_x = self._scale_input(deltas[0])
-            scaled_y = self._scale_input(deltas[1])
-            return (round(scaled_x) , round(scaled_y))
+
+            return (round(deltas[0]) , round(deltas[1]))
         else:
             return (0,0)
         
