@@ -1,9 +1,5 @@
 {
-    "logging": {
-        "debug": false,
-        "fps": true
-    },
-
+    "debug": false,
     "model": {
         "base_dir": "models/pf_1550img_11s/weights",
         "name": "320x320_stripped.engine",
@@ -24,8 +20,8 @@
         "head_toggle" : true,
         "predict_crosshair": true,
         "predict_drop": true,
-        "zoom": 1.5,
-        "projectile_velocity": 2800,
+        "zoom": 3,
+        "projectile_velocity": 3000,
         "base_head_offset": 0.35,
         "fov": 80
     },

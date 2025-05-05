@@ -13,13 +13,7 @@ sys.path.insert(0, str(github_dir / 'Betterercam'))
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 # print(betterercam.__file__)
-
-from data_parsing import targetselector
-from engine import model
-from input import mousemover, inputdetector
-from gui import manager
-from utils import fpstracker
-
+from utils import targetselector, model, mousemover, inputdetector,gui_manager
 from argparse import Namespace  
 from screeninfo import get_monitors
 
@@ -35,6 +29,7 @@ class Aimbot:
         config_path = Path.cwd() / "aimbot_config.json"
         with open(config_path) as f:
             cfg = json.load(f)
+        self.debug = cfg['debug']
         model_path = Path.cwd() / cfg['model']['base_dir'] / cfg['model']['name']
         pt_hw_capture = tuple(cfg['model']['hw_capture'])
         #okay this is a little bit confusing
@@ -44,14 +39,13 @@ class Aimbot:
         self.hw_capture = self.model.hw_capture#grab hw_capture from model since engine determines by itself
         #maybe i shouldnt even have hw_capture as a param but pt models can do whatever size so not sure
         self.load_monitor_settings()
+        self.load_targeting_cfg(cfg)
         
-        self.load_cfg(cfg)
-        
-        self.mousemover = mousemover.MouseMover(self.overall_sens,self.sens_scaling,self.max_deltas,self.jitter_strength,self.overshoot_strength,self.overshoot_chance,self.debug)
+        self.mousemover = mousemover.MouseMover(self.overall_sens,self.sens_scaling,self.max_deltas,self.jitter_strength,self.overshoot_strength,self.overshoot_chance)
         self.inputdetector = inputdetector.InputDetector(self.debug)
         self.inputdetector.start_input_detection()
-        if self.is_fps_tracked:
-            self.fps_tracker = fpstracker.FPSTracker()
+        
+        self.fps_tracker = FPSTracker()
         self.setup_tracker()
         
             
@@ -60,7 +54,7 @@ class Aimbot:
         capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
         self.camera = betterercam.create(region = capture_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)
         
-        self.manager = manager.GUIManager(cfg['gui_settings'],self.hw_capture)
+        self.gui_manager = gui_manager.GUIManager(cfg['gui_settings'],self.hw_capture)
         
         #if using yolo inference need to use BGR since they assume your input is BGR
         
@@ -68,28 +62,26 @@ class Aimbot:
         
         try:
             while True:
-                # if not self.inputdetector.is_rmb_pressed:
-                #     #15ms sleep when not ads
-                #     time.sleep(15e-3)
                 frame = self.camera.grab()
                 if frame is None:
                     #if no fresh frame available from directx frame buffer
                     continue
                 
-                results = self.model.inference(src = frame) #(n,6)
+                results = self.model.inference(src = frame)
                 boxes_results = self.model.parse_results_into_ultralytics_boxes(results)
                 self.tracker.update(boxes_results.cpu().numpy())#kind of annoying to convert to cpu but whatever
                 #could this be done more efficiently or convert somewhere earlier upstream?
                 #predicts next positions of tracked detections then gets results
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
-                tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])#(n,8)
-                if self.manager:
-                    self.manager.render_gui(frame,tracked_detections)
+                tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
+                
+                if self.gui_manager:
+                    self.gui_manager.render_gui(frame,tracked_detections)
                     
                 if self.inputdetector.is_rmb_pressed and len(tracked_detections) > 0:
                     self.aimbot(tracked_detections)
-                if self.is_fps_tracked:
-                    self.fps_tracker.update()
+                    
+                self.fps_tracker.update()
         except KeyboardInterrupt:
             print('Shutting down...')
         finally:
@@ -104,14 +96,7 @@ class Aimbot:
         self.x_offset = (self.screen_x - self.hw_capture[1]) // 2
         self.y_offset = (self.screen_y - self.hw_capture[0]) // 2
         
-    def load_cfg(self,cfg:dict):
-        """
-        cfg loading is order dependent so cant change where this method is called really
-        """
-        #logging
-        self.debug = cfg['logging']['debug']
-        self.is_fps_tracked = cfg['logging']['fps']
-        
+    def load_targeting_cfg(self,cfg:dict):
         #sens settings
         self.overall_sens = cfg['sensitivity_settings']['overall_sens']
         self.sens_scaling = cfg['sensitivity_settings']['sens_scaling']
@@ -162,12 +147,11 @@ class Aimbot:
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
 
     def cleanup(self):
-        """
-        may need to improve cleanup though its probably not needed
-        """
         if self.camera:
             self.camera.release()
             del self.camera
+        if self.debug:
+            cv2.destroyAllWindows()
         torch.cuda.empty_cache()
         
     def aimbot(self, detections:np.ndarray):  
@@ -180,6 +164,21 @@ class Aimbot:
         if deltas != (0,0):#if valid target
             self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
 
+class FPSTracker:
+    def __init__(self, update_interval=16):
+        self.frame_count = 0
+        self.last_update = time.perf_counter()
+        self.update_interval = update_interval
+
+    def update(self):
+        self.frame_count += 1
+        current_time = time.perf_counter()
+        
+        if current_time - self.last_update >= self.update_interval:
+            fps = self.frame_count / (current_time - self.last_update)
+            print(f'FPS: {fps:.2f}')
+            self.frame_count = 0
+            self.last_update = current_time
 
 if __name__ == "__main__":
     Aimbot().main()
