@@ -1,8 +1,5 @@
 import numpy as np
 import math
-import random
-import time
-from ultralytics.trackers.byte_tracker import STrack
 
 class TargetSelector:
     
@@ -15,9 +12,6 @@ class TargetSelector:
             target_cls_id: int,
             crosshair_cls_id: int,
             max_deltas: int,
-            sensitivity: float,
-            rand_sens_mult_std_dev: float,
-            min_sens_mult: float,
             predict_drop:bool,
             predict_crosshair:bool,
             zoom:float,
@@ -30,8 +24,6 @@ class TargetSelector:
         self.target_cls_id = target_cls_id
         self.crosshair_cls_id = crosshair_cls_id
         self.max_deltas = max_deltas
-        self.sensitivity = sensitivity
-        self.min_sensitivity = sensitivity * min_sens_mult
         self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
         self.screen_height = screen_hw[0]
         self.screen_width = screen_hw[1]
@@ -40,66 +32,46 @@ class TargetSelector:
         self.predict_drop = predict_drop
         self.predict_crosshair = predict_crosshair
         self.zoom = zoom
-        self.sens_std_dev = rand_sens_mult_std_dev
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
-        self.DISTANCE_CONST =0.51#calibration const
+        self.DISTANCE_CONST =.45#calibration const
         self.debug = False
 
 
-    def _calculate_distance(self, target_height_pixels=None, target_real_height=5,
-                            target_width_pixels=None, target_real_width=3.5):
+    def _calculate_distance(self, target_height_pixels = None, target_real_height=5,
+                            target_width_pixels= None, target_real_width=3.5):
         """
-        Improved distance calculation with error-aware weighting and stability checks
+        Robust distance calculation with perspective-safe head detection and weighted uncertainty.
         """
         distances = []
-        weights = []
+        variances = []
         
-        eff_vert_fov = self.vfov_rad / self.zoom
-        eff_horiz_fov = self.hfov_rad / self.zoom
-        min_angular_size = math.radians(0.3)  # ~0.3 degree minimum (about 5 pixels on 1080p)
 
-        # Height-based calculation
+        eff_vert_fov = self.vfov_rad / self.zoom  # More intuitive than 1/zoom
+        eff_horiz_fov = self.hfov_rad / self.zoom
+
+        # 4. Height-based calculation with uncertainty weighting
         if target_height_pixels and target_real_height:
             px_per_rad = self.screen_height / eff_vert_fov
             angular_size = target_height_pixels / px_per_rad
-            angular_size = max(angular_size, min_angular_size)
-            
-            try:
-                dist = target_real_height / (2 * math.tan(angular_size / 2))
-                # Weight by angular size squared (favors larger/more certain measurements)
-                weight = (angular_size ** 2) + 1e-6  # Avoid zero division
-                distances.append(dist)
-                weights.append(weight)
-            except ZeroDivisionError:
-                pass
+            dist = target_real_height / (2 * math.tan(angular_size / 2))
+            distances.append(dist)
+            # Weight by inverse square of angular size (smaller = less reliable)
+            variances.append(angular_size ** 2)
 
-        # Width-based calculation
+        # 5. Width-based calculation (same logic)
         if target_width_pixels and target_real_width:
             px_per_rad = self.screen_width / eff_horiz_fov
             angular_size = target_width_pixels / px_per_rad
-            angular_size = max(angular_size, min_angular_size)
-            
-            try:
-                dist = target_real_width / (2 * math.tan(angular_size / 2))
-                weight = (angular_size ** 2) + 1e-6
-                distances.append(dist)
-                weights.append(weight)
-            except ZeroDivisionError:
-                pass
+            dist = target_real_width / (2 * math.tan(angular_size / 2))
+            distances.append(dist)
+            variances.append(angular_size ** 2)
 
-        # Fallback if no valid measurements
-        if not distances:
-            return 0.0  # Or appropriate default
+        # 6. Physics-based weighting instead of magic numbers
+        weights = [1/v for v in variances] if len(variances) == 2 else [1]
+        weighted_distance = sum(d * w for d, w in zip(distances, weights)) / sum(weights)
 
-        # Geometric mean is more stable for disparate measurements
-        combined_distance = math.exp(sum(w * math.log(d) for w, d in zip(weights, distances)) / sum(weights))
-        
-        # Optional: Add maximum distance sanity check (adjust based on your scenario)
-        max_reasonable_distance = 400  
-        combined_distance = min(combined_distance, max_reasonable_distance)
-        
-        return combined_distance * self.DISTANCE_CONST
+        return weighted_distance * self.DISTANCE_CONST  # Document this as "calibration factor"
     
     def _calculate_travel_time(self, delta_x):
         time_of_flight = delta_x / self.projectile_velocity
@@ -121,17 +93,6 @@ class TargetSelector:
         angular_drop_rad = real_drop / distance
         screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
-
-    def _scale_input(self, delta):
-        """
-        applies linear sensitivity scaling with randomness
-        
-        if deltas higher, sens is lower, reduces flicking severity
-        """
-        ratio = 1 - min(delta / self.max_deltas, 1)
-        sensitivity = self.min_sensitivity + (self.sensitivity - self.min_sensitivity) * ratio
-        rand_scaling = random.gauss(mu = 1, sigma = self.sens_std_dev)
-        return delta * sensitivity * rand_scaling
 
 
     def _get_closest_detection(self,detections:np.ndarray,reference_point:tuple[int,int]) -> tuple:
@@ -155,9 +116,8 @@ class TargetSelector:
         x1,y1 = crosshair_xy[:]
         deltas = (x2-x1 , y2-y1)
         if abs(deltas[0]) < self.max_deltas and abs(deltas[1])< self.max_deltas:
-            scaled_x = self._scale_input(deltas[0])
-            scaled_y = self._scale_input(deltas[1])
-            return (round(scaled_x) , round(scaled_y))
+
+            return (round(deltas[0]) , round(deltas[1]))
         else:
             return (0,0)
         
@@ -177,7 +137,7 @@ class TargetSelector:
         """
         processes detection array of shape (n, 8) where columns are:
         
-        [x1, y1, x2, y2, track_id, confidence, class_id, not_sure_what_this_is_idx]
+        [x1, y1, x2, y2, track_id, confidence, class_id, Strack idx]
         """
         cls_mask = detections[:,6] == self.target_cls_id
         if np.count_nonzero(cls_mask) != 0:#checking if any targets exist

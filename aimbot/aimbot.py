@@ -1,14 +1,8 @@
 from ultralytics import YOLO
 from ultralytics.trackers.byte_tracker import BYTETracker
-from ultralytics.engine.results import Boxes
 
 import cv2
-import threading
 import time
-import keyboard
-import win32api
-import win32con
-# import os
 import torch
 import sys
 from pathlib import Path
@@ -19,139 +13,215 @@ sys.path.insert(0, str(github_dir / 'Betterercam'))
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 # print(betterercam.__file__)
-from utils import targetselector, tensorrt_engine
+
+from data_parsing import targetselector
+from engine import model
+from input import mousemover, inputdetector
+from gui import gui_manager
+from utils import fpstracker
+
 from argparse import Namespace  
 from screeninfo import get_monitors
+import traceback
 
 
 class Aimbot:
     def __init__(self):
+
+        self.load_config_file()
+        self.init_model()
+        self.init_monitor()
+        #i think these have to be after monitor/model init
+        self.load_aim_config()
+        self.load_other_config()
+        self.init_input()
+        
+        self.gui_manager = gui_manager.GUI_Manager(self.cfg['gui_settings'],self.scanning_hw_capture)
+        
+        if self.is_fps_tracked:
+            self.fps_tracker = fpstracker.FPSTracker()
+        
+        self.init_camera()
+        self.setup_bytetracker()
+        
+    def load_config_file(self):
         import json
         config_path = Path.cwd() / "aimbot_config.json"
         with open(config_path) as f:
-            cfg = json.load(f)
-        self.debug = cfg['debug']
-        model_path = Path.cwd() / cfg['model']['base_dir'] / cfg['model']['name']
-        pt_hw_capture = tuple(cfg['model']['hw_capture'])
-        #hw_capture is only used for pt models, engine models load it themselves
-        self.load_model(model_path, hw_capture=pt_hw_capture)
-        self.load_monitor_settings()
-        self.load_targeting_cfg(cfg)
-
-        self.is_key_pressed = False
-        self.fps_tracker = FPSTracker()
-        self.setup_tracker()
-
-        if self.debug:
-            window_height, window_width = self.hw_capture  
-            cv2.namedWindow("Screen Capture Detection", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("Screen Capture Detection", window_width, window_height)
-            
-        #empty boxes to pass into tracker if no detections
-        self.empty_boxes = Boxes(boxes=torch.empty((0, 6), device=torch.device('cuda')),orig_shape=self.hw_capture)
+            self.cfg = json.load(f)
+    
+    def init_model(self):
+        #working on multi model support (scanning/ads)
+        ads_path = Path.cwd() / self.cfg['model']['ads_dir'] / self.cfg['model']['ads_filename']
         
-        capture_region = (0 + self.x_offset, 0 + self.y_offset, self.screen_x - self.x_offset, self.screen_y - self.y_offset)
-        self.camera = betterercam.create(region = capture_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)
-        #if using yolo inference need to use BGR since they assume your input is BGR
+        if not ads_path.exists():  
+            raise FileNotFoundError(f"ADS model missing: {ads_path}")  
         
-    def main(self):     
-        threading.Thread(target=self.input_detection, daemon=True).start()
+        scanning_path = Path.cwd() / self.cfg['model']['scanning_dir'] / self.cfg['model']['scanning_filename']
         
-        try:
-            while True:
-                frame = self.camera.grab()
-                if frame is None:
-                    #if no fresh frame available from directx frame buffer
-                    continue
-                
-                if self.model_ext == '.engine':
-                    processed_frame = self.preprocess_tensorrt(frame)
-                    self.inference_tensorrt(processed_frame)
-                elif self.model_ext == '.pt':
-                    processed_frame = self.preprocess_torch(frame)
-                    self.inference_torch(processed_frame)
-                
-                #predicts next positions of tracked detections then gets results
-                BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
-                tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])
-                
-                if self.debug:
-                    display_frame = cp.asnumpy(frame)
-                    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-                    self.debug_render(display_frame)
-                
-                if self.is_key_pressed and len(tracked_detections) > 0:
-                    self.aimbot(tracked_detections)
-                    
-                self.fps_tracker.update()
-        except KeyboardInterrupt:
-            print('Shutting down...')
-        finally:
-            self.cleanup()
-            
-    def load_monitor_settings(self):
+        if not scanning_path.exists() or scanning_path == ads_path:
+            print(f'SCANNING MODEL PATH DOES NOT EXIST OR SAME AS ADS MODEL, FALLING BACK TO ADS MODEL')
+            scanning_path = ads_path
+        
+        #this capture dimension is only used for pt models, engine models load dimensions internally
+        pt_hw_capture = tuple(self.cfg['model']['pt_hw_capture'])
+        
+        #load both models
+        #if models are the same, only load 1 model make both regions the same
+        
+        self.ads_model = model.Model(ads_path, hw_capture=pt_hw_capture)
+        self.ads_hw_capture = self.ads_model.hw_capture
+        
+        if ads_path == scanning_path:
+            self.scanning_model = self.ads_model
+        else: 
+            self.scanning_model = model.Model(scanning_path, hw_capture=pt_hw_capture)
+        self.scanning_hw_capture = self.scanning_model.hw_capture
+        
+        
+    def init_monitor(self):
         #dynamic monitor settings
         monitor = get_monitors()[0]
         self.screen_x = monitor.width
         self.screen_y = monitor.height
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
-        self.x_offset = (self.screen_x - self.hw_capture[1]) // 2
-        self.y_offset = (self.screen_y - self.hw_capture[0]) // 2
+
+    
+    def init_input(self):
+        self.mousemover = mousemover.MouseMover(self.overall_sens,self.sens_scaling,self.max_deltas,self.jitter_strength,self.overshoot_strength,self.overshoot_chance,self.debug)
+        self.inputdetector = inputdetector.InputDetector(self.debug)
+        self.inputdetector.start_input_detection()
+
+    def init_camera(self):
+        scanning_x_offset = (self.screen_x - self.scanning_hw_capture[1]) // 2
+        scanning_y_offset = (self.screen_y - self.scanning_hw_capture[0]) // 2
         
-    def load_targeting_cfg(self,cfg:dict):
+        ads_x_offset = (self.scanning_hw_capture[1] - self.ads_hw_capture[1]) // 2
+        ads_y_offset = (self.scanning_hw_capture[0] - self.ads_hw_capture[0]) // 2
+        
+        #need to modify for dual region i think later
+        scanning_region = (0 + scanning_x_offset, 0 + scanning_y_offset, self.screen_x - scanning_x_offset, self.screen_y - scanning_y_offset)
+        
+        self.ads_region = (
+            scanning_region[0] + ads_x_offset,
+            scanning_region[1] + ads_y_offset,
+            scanning_region[2] - ads_x_offset,
+            scanning_region[3] - ads_y_offset
+        )
+
+        # print(f'ads dimensions: {self.ads_hw_capture}')
+        # print(f'scanning dimensions: {self.scanning_hw_capture}')
+        # print(f'ads region: {self.ads_region}')
+        # print(f'scanning region: {scanning_region}')
+        
+        #by default uses scanning region when ads, use ads region
+        self.camera = betterercam.create(region = scanning_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)
+        
+        #if using yolo inference need to use BGR since they assume your input is BGR
+    
+    
+    
+    def main(self):     
+        frame_model:model.Model
+        try:
+            while True:
+                # if not self.inputdetector.is_rmb_pressed:
+                # #     #15ms sleep when not ads
+                #     time.sleep(15e-3)
+                
+                #if rmb pressed, use smaller region else just use main region
+                if self.inputdetector.is_rmb_pressed:
+                    frame = self.camera.grab(region = self.ads_region)
+                    frame_model = self.ads_model
+
+                else:    
+                    #uses default region (scanning)
+                    frame = self.camera.grab()
+                    frame_model = self.scanning_model
+
+                
+                
+                
+                if frame is None:
+                    #if no fresh frame available from directx frame buffer
+                    continue
+                
+                results = frame_model.inference(src = frame) #(n,6)
+                boxes_results = frame_model.parse_results_into_ultralytics_boxes(results)
+                self.tracker.update(boxes_results.cpu().numpy())
+                #could possibly convert somewhere upstream but idk if thats even more efficient
+                #predicts next positions of tracked detections then gets results
+                BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
+                tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])#(n,8)
+                
+                if self.inputdetector.is_rmb_pressed and len(tracked_detections) > 0:
+                    self.aimbot(tracked_detections)
+                    # print(tracked_detections)
+                    
+                if self.is_fps_tracked:
+                    self.fps_tracker.update()
+
+                if self.gui_manager:  
+                    self.gui_manager.render(frame, tracked_detections, self.inputdetector.is_rmb_pressed)  
+                
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            self.cleanup()
+            sys.exit(0)  # Clean exit
+            
+        except Exception as e:
+            print(f"Fatal error: {traceback.print_exc()}")
+            self.cleanup()
+            sys.exit(1)
+    
+    def load_other_config(self):
+        #logging
+        self.debug = self.cfg['logging']['debug']
+        self.is_fps_tracked = self.cfg['logging']['fps']
+        
+    def load_aim_config(self):
+        """
+        cfg loading is order dependent so cant change where this method is called really
+        """
         #sens settings
-        sens = cfg['sensitivity_settings']['sens']
-        rand_sens_mult_std_dev = cfg['sensitivity_settings']['rand_sens_mult_std_dev']
-        min_sens_mult = cfg['sensitivity_settings']['min_sens_mult']
-        max_deltas = cfg['sensitivity_settings']['max_deltas']
+        self.overall_sens = self.cfg['sensitivity_settings']['overall_sens']
+        self.sens_scaling = self.cfg['sensitivity_settings']['sens_scaling']
+        self.max_deltas = self.cfg['sensitivity_settings']['max_deltas']
+        self.jitter_strength = self.cfg['sensitivity_settings']['jitter_strength']
+        self.overshoot_strength = self.cfg['sensitivity_settings']['overshoot_strength']
+        self.overshoot_chance = self.cfg['sensitivity_settings']['overshoot_chance']
         #targeting/ bullet prediction settings
         #need self scope for debug stuff below
-        self.target_cls_id = cfg['targeting_settings']['target_cls_id']
-        self.crosshair_cls_id = cfg['targeting_settings']['crosshair_cls_id']
-        head_toggle = cfg['targeting_settings']['head_toggle']
-        predict_drop = cfg['targeting_settings']['predict_drop']
-        predict_crosshair = cfg['targeting_settings']['predict_crosshair']
-        zoom = cfg['targeting_settings']['zoom']
-        projectile_velocity = cfg['targeting_settings']['projectile_velocity']
-        base_head_offset = cfg['targeting_settings']['base_head_offset']
-        fov = cfg['targeting_settings']['fov']
+        self.target_cls_id = self.cfg['targeting_settings']['target_cls_id']
+        self.crosshair_cls_id = self.cfg['targeting_settings']['crosshair_cls_id']
+        head_toggle = self.cfg['targeting_settings']['head_toggle']
+        predict_drop = self.cfg['targeting_settings']['predict_drop']
+        predict_crosshair = self.cfg['targeting_settings']['predict_crosshair']
+        zoom = self.cfg['targeting_settings']['zoom']
+        projectile_velocity = self.cfg['targeting_settings']['projectile_velocity']
+        base_head_offset = self.cfg['targeting_settings']['base_head_offset']
+        fov = self.cfg['targeting_settings']['fov']
         
         self.target_selector = targetselector.TargetSelector(
-            detection_window_dim=self.hw_capture,
+            detection_window_dim=self.ads_hw_capture,
             head_toggle=head_toggle,
             target_cls_id=self.target_cls_id,
             crosshair_cls_id=self.crosshair_cls_id,
-            max_deltas = max_deltas,
-            sensitivity = sens,
+            max_deltas = self.max_deltas,
             projectile_velocity=projectile_velocity,
             base_head_offset=base_head_offset,
             screen_hw= (self.screen_y,self.screen_x),
             zoom = zoom,
             hFOV_degrees= fov,
-            rand_sens_mult_std_dev= rand_sens_mult_std_dev,
             predict_drop=predict_drop,
-            min_sens_mult=min_sens_mult,
             predict_crosshair = predict_crosshair
         )
         
         
-    def load_model(self, model_path: Path, hw_capture = (640,640)):
-        self.model_ext = model_path.suffix
-        if self.model_ext == '.engine':
-            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, conf_threshold= .25,verbose = False)
-            self.hw_capture = self.model.imgsz
-            if self.model == None:
-                raise Exception("tensorrt engine not loading correctly maybe set verbose = True")
-        elif self.model_ext == '.pt':
-            self.hw_capture = hw_capture#can be set to whatever
-            self.model = YOLO(model = model_path)
-        else:
-            raise Exception(f'not supported file format: {self.model_ext} <- file format should be here lol')
-        
-    def setup_tracker(self):
+    def setup_bytetracker(self):
         #if engine is running just going to assume 144 is the target frame rate
-        #if pt model is running its probably debug screen as well so 30
-        target_frame_rate = 144 if self.model_ext == ".engine" else 30
+        #if pt model is running its probably debug screen so 30
+        target_frame_rate = 144 if self.ads_model.model_ext == ".engine" else 30
         args = Namespace(
             track_high_thresh=.65,
             track_low_thresh=.4,
@@ -163,113 +233,39 @@ class Aimbot:
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
 
     def cleanup(self):
-        if self.camera:
-            self.camera.release()
-            del self.camera
-        if self.debug:
-            cv2.destroyAllWindows()
-        torch.cuda.empty_cache()
-        
-    def aimbot(self, detections):  
-        deltas = self.target_selector.get_deltas(detections)
-        if deltas is not None:#if valid target
-            self.move_mouse_to_bounding_box(deltas)
-
-    def move_mouse_to_bounding_box(self, deltas):
-        delta_x = deltas[0]
-        delta_y = deltas[1]
-        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(delta_x), int(delta_y), 0, 0)
-            
-    def input_detection(self):
-        #SHOULD ADD A ZOOM TOGGLE THING
-        def on_key_press(event):
-            if event.name.lower() == 'y':
-                self.is_key_pressed = not self.is_key_pressed
-                print(f"Key toggled: {self.is_key_pressed}")
+        print("STARTING CLEANUP")
+        try:
+            if hasattr(self, 'camera') and self.camera:
+                print('Releasing camera')
+                self.camera.release()  # Ensure proper release
+                del self.camera
+                self.camera = None  # Explicitly clear reference
                 
-        keyboard.on_press(on_key_press)
-        while True:#keeps thread alive
-            time.sleep(.1)
+            if hasattr(self, 'gui_manager') and self.gui_manager:
+                print('Cleaning up GUI')
+                self.gui_manager.cleanup()
+                del self.gui_manager
+                self.gui_manager = None
+            if hasattr(self, 'ads_model'):
+                print('Removing ads_model')
+                del self.ads_model
+            if hasattr(self, 'scanning_model'):
+                print('Removing scanning_model')
+                del self.scanning_model
+            torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"Cleanup error: {e}")
             
-    def parse_results_into_boxes(self,results: torch.Tensor, img_sz: tuple ) -> Boxes:
-        #need to convert into boxes to pass into the ultralytics BYTETracker
-        if len(results) == 0:#xyxy, conf, cls, smth else?
-            return Boxes(boxes=torch.empty((0, 6)), orig_shape=img_sz)
-        converted_boxes = Boxes(
-            boxes=results,
-            orig_shape=img_sz
-        )
-        return converted_boxes 
-    
-    #almost 25% speedup over np (preprocess + inference)
-    #also python doesnt have method overloading by parameter type
-    def _preprocess_frame(self,frame:cp.ndarray) -> cp.ndarray:
-        bchw = frame.transpose(2, 0, 1)[cp.newaxis, ...]
-        float_frame = bchw.astype(cp.float32, copy=False)#engine expects float 32 unless i export it differently
-        float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-        return float_frame
-    
-    def preprocess_tensorrt(self,frame: cp.ndarray) -> cp.ndarray:
-        return cp.ascontiguousarray(self._preprocess_frame(frame))
+    def aimbot(self, detections:np.ndarray):  
+        """
+        Args:
+            detections (np.ndarray):detection array FROM TRACKER of shape (n, 8) where columns are:
+            [x1, y1, x2, y2, track_id, confidence, class_id, strack_idx]
+        """
+        deltas = self.target_selector.get_deltas(detections)
+        if deltas != (0,0):#if valid target
+            self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
 
-    def inference_tensorrt(self,src:cp.ndarray) -> np.ndarray:
-        results = self.model.inference_cp(src = src)
-        results = torch.as_tensor(results)#should be pretty inexpensive since it references the same memory
-        results = self.parse_results_into_boxes(results, self.hw_capture)
-        return self.tracker.update(results.cpu().numpy())
-        
-    def preprocess_torch(self,frame: cp.ndarray) -> torch.Tensor:
-        return torch.as_tensor(self._preprocess_frame(frame)).contiguous()   
-    
-    @torch.inference_mode()
-    def inference_torch(self,source:torch.Tensor) -> np.ndarray:
-        results = self.model(source=source,
-            conf = .25,
-            imgsz=self.hw_capture,
-            verbose = False
-        )
-        if results[0].boxes.data.numel() == 0: 
-            return self.tracker.update(self.empty_boxes.cpu().numpy())
-
-        return self.tracker.update(results[0].boxes.cpu().numpy())
-
-    def debug_render(self,frame):
-        display_frame = cp.asnumpy(frame)
-        stracks = [x for x in self.tracker.tracked_stracks if x.is_activated]#not sure if activated is needed
-        #strack.results doesnt have what i want
-        
-        for strack in stracks:
-            x1, y1, x2, y2, = map(int,strack.xyxy)
-            if strack.cls == self.crosshair_cls_id:#if crosshair
-                cv2.circle(display_frame, ((x1 + x2) // 2, (y1 + y2) // 2),4, (0, 255, 0), -1)
-                cv2.putText(display_frame, f"score: {strack.score:.2f}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            else:
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 1)
-                cv2.circle(display_frame, ((x1 + x2) // 2, (y1 + y2) // 2),4, (255, 0, 204), -1)
-                # cv2.circle(display_frame, ((x1 + x2) // 2, (y1 + y2)// 2 - int((y2-y1)*.39)),4, (255, 0, 204), -1)
-                cv2.putText(display_frame, f"score: {strack.score:.2f}", (int(x1), int(y1) - 48),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(display_frame, f"cls_id: {strack.cls}", (int(x1), int(y1) - 36),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(display_frame, f"ID: {strack.track_id}", (int(x1), int(y1) - 24),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(display_frame, f"nums_frames_seen: {strack.end_frame - strack.start_frame}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        cv2.imshow("Screen Capture Detection", display_frame)
-        cv2.waitKey(1)
-
-class FPSTracker:
-    def __init__(self, update_interval=10.0):
-        self.frame_count = 0
-        self.last_update = time.perf_counter()
-        self.update_interval = update_interval
-
-    def update(self):
-        self.frame_count += 1
-        current_time = time.perf_counter()
-        
-        if current_time - self.last_update >= self.update_interval:
-            fps = self.frame_count / (current_time - self.last_update)
-            print(f'FPS: {fps:.2f}')
-            self.frame_count = 0
-            self.last_update = current_time
 
 if __name__ == "__main__":
     Aimbot().main()
