@@ -3,19 +3,28 @@ import win32gui
 import win32con
 import win32api
 import time
+import numpy as np
 
 class DPGOverlay:
-    def __init__(self,height:int,width:int):
+    def __init__(self,height:int,width:int,only_render_overlay_non_ads:bool):
         self.padding = 16
         self.draw_offset = self.padding//2
         self.vp_width = width
         self.vp_height = height
         self.drawlist_tag = "drawing_area"
-
+        
         dpg.create_context()
         self._setup_viewport()
         self._create_window()
         self._draw_corner_edges(offset=self.padding)
+        #store bounding box tags to delete later
+        self.bbox_tags = []
+        self.are_bb_drawn = False
+        self.only_render_overlay_non_ads = only_render_overlay_non_ads
+        
+        self._start()
+        #count frames of not updated
+        self.frame_count = 0
 
     def _setup_viewport(self):
         screen_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
@@ -29,9 +38,12 @@ class DPGOverlay:
             height=self.vp_height,
             clear_color=[0.0, 0.0, 0.0, 0.0],
             always_on_top=True,
-            decorated=False
+            decorated=False,
+            vsync=True,
         )
+        
         dpg.set_viewport_pos([center_x, center_y])
+        dpg.configure_app(manual_callback_management=True)  # ← Takes full control of rendering
 
     def _create_window(self):
         with dpg.window(
@@ -75,25 +87,27 @@ class DPGOverlay:
         dpg.draw_line((draw_width - corner_length - offset, draw_height - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
         dpg.draw_line((draw_width - offset, draw_height - corner_length - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
 
-    def draw_bounding_box(self, x1: int, y1: int, x2: int, y2: int):
+    def _draw_bounding_box(self, x1: int, y1: int, x2: int, y2: int):
         x1_adj = x1 - self.draw_offset
         y1_adj = y1 - self.draw_offset
         x2_adj = x2 - self.draw_offset
         y2_adj = y2 - self.draw_offset
 
-        dpg.draw_rectangle(
+        tag = dpg.draw_rectangle(
             (x1_adj, y1_adj),
             (x2_adj, y2_adj),
             color=(0, 255, 0, 255),
             thickness=2,
             parent=self.drawlist_tag
         )
+        self.bbox_tags.append(tag)
+        
+    def _clear_canvas(self):
+        for tag in self.bbox_tags:
+            dpg.delete_item(tag)
+        self.bbox_tags.clear()
 
-    def clear_canvas(self):
-        dpg.delete_item(self.drawlist_tag, children_only=True)
-        self._draw_corner_edges(offset=self.padding)
-
-    def apply_transparency(self):
+    def _apply_transparency(self):
         hwnd = win32gui.FindWindow(None, "Transparent Overlay")
         if hwnd:
             # print('for sure applying')
@@ -106,7 +120,7 @@ class DPGOverlay:
         else:
             print("Window handle not found!")
 
-    def start(self):
+    def _start(self):
         dpg.setup_dearpygui()
         dpg.show_viewport()
 
@@ -114,9 +128,72 @@ class DPGOverlay:
         # print('waiting transparency')
         time.sleep(0.5)
         # print('applying transparency')
-        self.apply_transparency()
+        self._apply_transparency()
+        self._draw_corner_edges()
+        self._render_frame()
 
-    def render(self):
+    def render(self, tracked_detections: np.ndarray, is_rmb_pressed: bool) -> None:
+        """render handler for bounding boxes"""
+        self.frame_count += 1
+
+        # force clear every 300 frames if theres no detections
+        if self.frame_count % 300 == 0 and tracked_detections.size == 0:
+            self._clear_canvas()
+            self._render_frame()
+            return
+
+        #get rendering decisions
+        should_draw, should_clear = self._should_render(tracked_detections, is_rmb_pressed)
+        
+        if not should_draw:
+            return
+        #need to clear canvas before drawing new bounding boxes
+        self._clear_canvas()
+
+        if should_clear:
+            # Clear existing boxes state
+            self.are_bb_drawn = False
+        elif tracked_detections.size > 0:
+            # Draw all valid detections
+            self.are_bb_drawn = True
+            for detection in tracked_detections:
+                x1, y1, x2, y2 = map(int, detection[:4])
+                self._draw_bounding_box(x1, y1, x2, y2)
+
+        # Push updates to screen
+        self._render_frame()
+
+
+    def _should_render(self, tracked_detections: np.ndarray, is_rmb_pressed: bool) -> tuple[bool, bool]:
+        """State machine for overlay visibility decisions
+        
+        ai so much more useful for writing comments than actual code lmfao
+        
+        Returns:
+            tuple[bool, bool]: 
+                [0] True if should render this frame
+                [1] True if should clear existing boxes
+        """
+        # Block rendering during ADS if configured
+        if self.only_render_overlay_non_ads and is_rmb_pressed:
+            if self.are_bb_drawn:
+                return (True, True)  # Force clear existing boxes
+            return (False, False)  # No action needed
+
+        has_valid_detections = tracked_detections.size > 0
+        
+        # Clear logic: no detections but boxes exist
+        if not has_valid_detections and self.are_bb_drawn:
+            return (True, True)
+            
+        # Draw logic: new detections available
+        if has_valid_detections:
+            return (True, False)
+            
+        # Default: no action needed
+        return (False, False)
+        
+    def _render_frame(self):
         dpg.render_dearpygui_frame()
     
     def cleanup(self):

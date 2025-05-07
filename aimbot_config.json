@@ -10,14 +10,15 @@
         "throttle_non_ads_ms": 15
     },
     "model": {
-        "base_dir": "models/pf_1550img_11s/weights",
-        "ads_model": "320x320_stripped.engine",
-        "scanning_model": "320x320_stripped.engine",
+        "ads_dir": "models/pf_1550img_11s/weights",
+        "ads_filename": "320x320_stripped.engine",
+        "scanning_dir": "models/pf_1550img_11x/weights",
+        "scanning_filename": "640x640_stripped.engine",
         "pt_hw_capture": [640, 640]
     },
 
     "sensitivity_settings": {
-        "max_deltas": 72,
+        "max_deltas": 120,
         "overall_sens": 0.45,
         "sens_scaling": 0.225,
         "jitter_strength": 0.05,
@@ -40,7 +41,7 @@
     "gui_settings":{
         "opencv_render": false,
         "dpg_overlay": true,
-        "only_render_gui_non_ads": true
+        "only_render_overlay_non_ads": true
     }
 
   }
