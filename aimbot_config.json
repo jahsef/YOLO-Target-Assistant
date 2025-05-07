@@ -1,23 +1,31 @@
 {
+    "IMPORTANT1": "ads model is only used when right clicking, dpg overlay only shows when not aiming",
+    "IMPORTANT2": "pt_hw_capture only for pytorch models",
+    "IMPORTANT3": "if scanning_model is invalid or the same as ads model then only ads model will be used",
     "logging": {
         "debug": false,
         "fps": true
     },
-
+    "other": {
+        "throttle_non_ads_ms": 15
+    },
     "model": {
         "base_dir": "models/pf_1550img_11s/weights",
-        "name": "320x320_stripped.engine",
-        "hw_capture": [640, 640]
+        "ads_model": "320x320_stripped.engine",
+        "scanning_model": "320x320_stripped.engine",
+        "pt_hw_capture": [640, 640]
     },
+
     "sensitivity_settings": {
-        "max_deltas": 120,
+        "max_deltas": 72,
         "overall_sens": 0.45,
         "sens_scaling": 0.225,
-        "jitter_strength": 0.1,
-        "overshoot_strength": 0.1,
-        "overshoot_chance": 0.1
+        "jitter_strength": 0.05,
+        "overshoot_strength": 0.05,
+        "overshoot_chance": 0.05
 
     },
+
     "targeting_settings": {
         "target_cls_id": 0,
         "crosshair_cls_id": 2,
@@ -25,13 +33,14 @@
         "predict_crosshair": true,
         "predict_drop": true,
         "zoom": 1.5,
-        "projectile_velocity": 2800,
+        "projectile_velocity": 2700,
         "base_head_offset": 0.35,
         "fov": 80
     },
     "gui_settings":{
         "opencv_render": false,
-        "dpg_overlay": false
+        "dpg_overlay": true,
+        "only_render_gui_non_ads": true
     }
 
   }

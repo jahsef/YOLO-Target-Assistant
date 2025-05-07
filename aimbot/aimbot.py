@@ -25,6 +25,7 @@ from screeninfo import get_monitors
 
 class Aimbot:
     def __init__(self):
+        #could simplify init even further into this
         # self._load_config()          # 1. Config first  
         # self._init_model()           # 2. Model (sets hw_capture)  
         # self._init_monitor()         # 3. Monitor (depends on hw_capture)  
@@ -35,8 +36,10 @@ class Aimbot:
         config_path = Path.cwd() / "aimbot_config.json"
         with open(config_path) as f:
             cfg = json.load(f)
-        model_path = Path.cwd() / cfg['model']['base_dir'] / cfg['model']['name']
-        pt_hw_capture = tuple(cfg['model']['hw_capture'])
+        
+        #working on multi model support (scanning/ads)
+        model_path = Path.cwd() / cfg['model']['base_dir'] / cfg['model']['ads_model']
+        pt_hw_capture = tuple(cfg['model']['pt_hw_capture'])
         #okay this is a little bit confusing
         #hw_capture is only used for pt models, engine models load it themselves
         
@@ -65,12 +68,17 @@ class Aimbot:
         #if using yolo inference need to use BGR since they assume your input is BGR
         
     def main(self):     
+        are_bb_drawn = False
         
         try:
             while True:
+
+                
+                    
                 # if not self.inputdetector.is_rmb_pressed:
-                #     #15ms sleep when not ads
+                # #     #15ms sleep when not ads
                 #     time.sleep(15e-3)
+                
                 frame = self.camera.grab()
                 if frame is None:
                     #if no fresh frame available from directx frame buffer
@@ -78,23 +86,52 @@ class Aimbot:
                 
                 results = self.model.inference(src = frame) #(n,6)
                 boxes_results = self.model.parse_results_into_ultralytics_boxes(results)
-                self.tracker.update(boxes_results.cpu().numpy())#kind of annoying to convert to cpu but whatever
-                #could this be done more efficiently or convert somewhere earlier upstream?
+                self.tracker.update(boxes_results.cpu().numpy())
+                #could possibly convert somewhere upstream but idk if thats even more efficient
                 #predicts next positions of tracked detections then gets results
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])#(n,8)
-                if self.manager:
-                    self.manager.render_gui(frame,tracked_detections)
-                    
+                
                 if self.inputdetector.is_rmb_pressed and len(tracked_detections) > 0:
                     self.aimbot(tracked_detections)
+                    
                 if self.is_fps_tracked:
                     self.fps_tracker.update()
+
+                if not self.manager:
+                    continue
+                
+                #SUPER JANK SHOULD HANDLE THIS BETTER IN MANAGER
+                if self.only_render_gui_non_ads and self.inputdetector.is_rmb_pressed:
+                    if self.manager.dpg_overlay and are_bb_drawn:
+                        self.manager.dpg_overlay.clear_canvas()
+                        self.manager.dpg_overlay.render()
+                    are_bb_drawn = False
+                    continue  # Skip rest of loop in GUI-only mode
+
+                # If there are detections, render them
+                if tracked_detections.size > 0:
+                    self.manager.render_gui(frame, tracked_detections)
+                    are_bb_drawn = True
+                elif are_bb_drawn:
+                    if self.manager.dpg_overlay:
+
+                        self.manager.dpg_overlay.clear_canvas()
+                        self.manager.dpg_overlay.render()
+                    are_bb_drawn = False
+
+                
+                    
+                
         except KeyboardInterrupt:
-            print('Shutting down...')
+            print('Restarting aimbot')
         finally:
             self.cleanup()
-            
+            Aimbot().main()
+    
+    def load_models(self,model_cfg:dict):
+        pass
+    
     def load_monitor_settings(self):
         #dynamic monitor settings
         monitor = get_monitors()[0]
@@ -130,6 +167,8 @@ class Aimbot:
         projectile_velocity = cfg['targeting_settings']['projectile_velocity']
         base_head_offset = cfg['targeting_settings']['base_head_offset']
         fov = cfg['targeting_settings']['fov']
+        
+        self.only_render_gui_non_ads = cfg['gui_settings']['only_render_gui_non_ads']
         
         self.target_selector = targetselector.TargetSelector(
             detection_window_dim=self.hw_capture,
@@ -168,6 +207,10 @@ class Aimbot:
         if self.camera:
             self.camera.release()
             del self.camera
+        if self.manager:
+            
+            self.manager.cleanup()
+        del self.model
         torch.cuda.empty_cache()
         
     def aimbot(self, detections:np.ndarray):  

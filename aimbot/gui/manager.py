@@ -91,4 +91,9 @@ class GUIManager:
         self.dpg_overlay.draw_bounding_box(100, 100, 200, 200)  # Example bounding box
         self.dpg_overlay.render()
 
-    
+    def cleanup(self):
+        if self.opencv_enabled:
+            cv2.destroyAllWindows()
+
+        if self.dpg_enabled:
+            self.dpg_overlay.cleanup()

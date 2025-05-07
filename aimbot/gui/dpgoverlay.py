@@ -96,7 +96,7 @@ class DPGOverlay:
     def apply_transparency(self):
         hwnd = win32gui.FindWindow(None, "Transparent Overlay")
         if hwnd:
-            print('for sure applying')
+            # print('for sure applying')
             win32gui.SetWindowLong(
                 hwnd,
                 win32con.GWL_EXSTYLE,
@@ -111,11 +111,14 @@ class DPGOverlay:
         dpg.show_viewport()
 
         # Wait for the window to be registered before applying transparency
-        print('waiting transparency')
+        # print('waiting transparency')
         time.sleep(0.5)
-        print('applying transparency')
+        # print('applying transparency')
         self.apply_transparency()
 
     def render(self):
         dpg.render_dearpygui_frame()
+    
+    def cleanup(self):
+        dpg.destroy_context()
         

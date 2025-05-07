@@ -34,7 +34,7 @@ class TargetSelector:
         self.zoom = zoom
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
-        self.DISTANCE_CONST =.475#calibration const
+        self.DISTANCE_CONST =.45#calibration const
         self.debug = False
 
 
