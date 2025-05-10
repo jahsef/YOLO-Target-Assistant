@@ -14,7 +14,7 @@
         "ads_filename": "320x320_stripped.engine",
         "scanning_dir": "models/pf_1550img_11x/weights",
         "scanning_filename": "640x640_stripped.engine",
-        "pt_hw_capture": [640, 640]
+        "pt_hw_capture": [320, 320]
     },
 
     "sensitivity_settings": {
@@ -34,7 +34,7 @@
         "predict_crosshair": true,
         "predict_drop": true,
         "zoom": 1.5,
-        "projectile_velocity": 2700,
+        "projectile_velocity": 3000,
         "base_head_offset": 0.35,
         "fov": 80
     },
