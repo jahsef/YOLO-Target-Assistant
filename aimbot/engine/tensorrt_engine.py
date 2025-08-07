@@ -118,7 +118,7 @@ if __name__ == '__main__':
     imgsz = (320,320)
     model = TensorRT_Engine(model_path,conf_threshold= 0, verbose = True)
 
-    img_path = os.path.join(cwd, 'datasets/EFPS_4000img_640x640/images/train/frame_13.jpg')
+    img_path = os.path.join(cwd, 'datasets/EFPS_4000img_640x640/images/train/frame_13(15).jpg')
     img = cv2.imread(img_path)
     img = cv2.resize(img, imgsz[::-1]) 
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
@@ -136,7 +136,7 @@ if __name__ == '__main__':
     print(output)
 
     # warmpsudps
-    for _ in range(64):
+    for _ in range(128):
         cp_img = cp.asarray(np_img) 
         # print(cp_img.data.ptr)
         output = model.inference_cp(cp_img)
@@ -145,11 +145,14 @@ if __name__ == '__main__':
         # output = None
         # cp_img = None
 
+    iterations = 16
+    inferences = 2560
+    
     fart = time.perf_counter()
-    for i in range(16):
+    for i in range(iterations):
         start = time.perf_counter()
-        for _ in range(1000):
+        for _ in range(inferences):
             results = model.inference_cp(cp_img)
-        print(f"Inference/s: {1000 / (time.perf_counter() - start):.2f}")
-    print(f'avg inference / s: {16*1000 / (time.perf_counter() - fart)}')
+        print(f"Inference/s: {inferences / (time.perf_counter() - start):.2f}")
+    print(f'avg inference / s: {iterations*inferences / (time.perf_counter() - fart)}')
 

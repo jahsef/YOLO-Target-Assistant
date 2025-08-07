@@ -143,16 +143,15 @@ class Aimbot:
                     frame = self.camera.grab()
                     frame_model = self.scanning_model
 
-                
-                
-                
                 if frame is None:
                     #if no fresh frame available from directx frame buffer
-                    continue
-                
+                    continue    
+
                 results = frame_model.inference(src = frame) #(n,6)
-                boxes_results = frame_model.parse_results_into_ultralytics_boxes(results)
-                self.tracker.update(boxes_results.cpu().numpy())
+                #results are converted into ultralytics boxes already
+                # boxes_results = frame_model.parse_results_into_ultralytics_boxes(results)
+                self.tracker.update(results.cpu().numpy())
+                
                 #could possibly convert somewhere upstream but idk if thats even more efficient
                 #predicts next positions of tracked detections then gets results
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)

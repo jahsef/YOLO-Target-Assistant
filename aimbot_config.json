@@ -14,7 +14,7 @@
         "ads_filename": "320x320_stripped.engine",
         "scanning_dir": "models/pf_1550img_11x/weights",
         "scanning_filename": "640x640_stripped.engine",
-        "pt_hw_capture": [640, 640]
+        "pt_hw_capture": [320, 320]
     },
 
     "sensitivity_settings": {

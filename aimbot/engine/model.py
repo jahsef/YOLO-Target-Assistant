@@ -4,7 +4,7 @@ from ultralytics import YOLO
 import cupy as cp
 import torch
 from ultralytics.engine.results import Boxes
-
+from ultralytics.engine.results import Results
 
 class Model:
     def __init__(self,model_path:Path,hw_capture:tuple[int,int]):
@@ -21,7 +21,7 @@ class Model:
         self._load_model(model_path=model_path,hw_capture=hw_capture)
         self.empty_boxes = Boxes(boxes=torch.empty((0, 6)), orig_shape=self.hw_capture)
     
-    def parse_results_into_ultralytics_boxes(self,results: object) -> Boxes:
+    def _parse_results_into_ultralytics_boxes(self,results: object) -> Boxes:
         """_summary_
 
         Args:
@@ -32,12 +32,19 @@ class Model:
         """
 
         #need to convert into boxes to pass into the ultralytics BYTETracker
-        if len(results) == 0:#xyxy, conf, cls, smth else?
+        #xyxy, conf, cls, smth else?
+
+        if type(results) is list:
+            # print('the correct thing runs now')
+            return results[0].boxes
+        
+        if len(results) == 0:
             return self.empty_boxes
         
         if type(results) is not torch.Tensor:
             results = torch.as_tensor(results)
-            
+        
+        
         converted_boxes = Boxes(
             boxes=results,
             orig_shape=self.hw_capture
@@ -63,14 +70,21 @@ class Model:
             src (cp.ndarray): source image in CuPy array, should be hwc
         
         Returns:
-            Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
+            Ultralytics Boxes results which were originally Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
+            
         """
+        
+
         if self.model_ext == '.engine':
-            return self._inference_tensorrt(self._preprocess_cp(src))
+            #Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
+            results = self._inference_tensorrt(self._preprocess_cp(src))
         elif self.model_ext == '.pt':
-            return self._inference_torch(self._preprocess_torch(src))
+            results =  self._inference_torch(self._preprocess_torch(src))
         else:
             raise Exception('big no no happened this should never execute, model was probably not loaded correctly')
+
+        return self._parse_results_into_ultralytics_boxes(results)
+
      
     def _preprocess_frame(self,frame:cp.ndarray) -> cp.ndarray:
         """_summary_
@@ -97,10 +111,11 @@ class Model:
 
     
     @torch.inference_mode()
-    def _inference_torch(self,source:torch.Tensor) -> torch.Tensor:
+    def _inference_torch(self,source:torch.Tensor) -> Boxes:
         results = self.model(source=source,
             conf = .25,
             imgsz=self.hw_capture,
-            verbose = False
+            verbose = True
         )
+        
         return results
