@@ -81,9 +81,12 @@ class Aimbot:
         
     def init_monitor(self):
         #dynamic monitor settings
-        monitor = get_monitors()[0]
+        monitor_idx = 0
+        monitor = get_monitors()[monitor_idx]
+        print(f'LOOKING AT MONITOR: {monitor_idx}')
         self.screen_x = monitor.width
         self.screen_y = monitor.height
+        print(f'MONITOR DIMS: {monitor.width} x {monitor.height}')
         self.screen_center = (self.screen_x // 2, self.screen_y // 2)
 
     
@@ -95,7 +98,8 @@ class Aimbot:
     def init_camera(self):
         scanning_x_offset = (self.screen_x - self.scanning_hw_capture[1]) // 2
         scanning_y_offset = (self.screen_y - self.scanning_hw_capture[0]) // 2
-        
+        print(self.screen_x)
+        print(self.scanning_hw_capture[1])
         ads_x_offset = (self.scanning_hw_capture[1] - self.ads_hw_capture[1]) // 2
         ads_y_offset = (self.scanning_hw_capture[0] - self.ads_hw_capture[0]) // 2
         

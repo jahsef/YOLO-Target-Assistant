@@ -18,11 +18,11 @@
     },
 
     "sensitivity_settings": {
-        "max_deltas": 120,
-        "overall_sens": 0.45,
-        "sens_scaling": 0.225,
-        "jitter_strength": 0.05,
-        "overshoot_strength": 0.05,
+        "max_deltas": 160,
+        "overall_sens": 0.5,
+        "sens_scaling": 0.25,
+        "jitter_strength": 0.00,
+        "overshoot_strength": 0.00,
         "overshoot_chance": 0.05
 
     },
@@ -34,7 +34,7 @@
         "predict_crosshair": true,
         "predict_drop": true,
         "zoom": 1.5,
-        "projectile_velocity": 2700,
+        "projectile_velocity": 2300,
         "base_head_offset": 0.35,
         "fov": 80
     },
