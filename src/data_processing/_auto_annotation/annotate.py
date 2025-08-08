@@ -62,7 +62,7 @@ def write_annotations(results, img_path):
     counters['total'] += 1
     boxes = results[0].boxes if results else []
     if len(boxes) == 0: 
-        if random.random() > .35:
+        if random.random() > 0.35:
             os.remove(img_path)
             counters['background'] += 1
             return
@@ -92,7 +92,7 @@ def write_annotations(results, img_path):
             counters['high_conf_crosshair'] += 1
             return
         
-    if random.random() > 1:  #bomb 70% anyway
+    if random.random() > 1.0:  #bomb 70% anyway
         os.remove(img_path)
         counters['bombed'] += 1
         return

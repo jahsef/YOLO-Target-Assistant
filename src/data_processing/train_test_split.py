@@ -5,11 +5,15 @@ import yaml
 from collections import deque
 import time
 
+TEST_SIZE = 0.2
+RANDOM_STATE = 42
+NEW_DIR_NAME = "pf_delta_test"
+
 cwd = Path.cwd()
 base_dir = 'datasets'
 #makes a new split dir copying contents from a presplit dir
 pre_split_dir = cwd / base_dir / 'pre_split_dataset'
-new_dir_name = "pf_delta_test"
+new_dir_name = NEW_DIR_NAME
 split_dir = cwd / base_dir / new_dir_name#make sure no important data is here lol 
 
 pre_split_images_dir =     pre_split_dir / 'images' / 'train'
@@ -46,7 +50,7 @@ image_paths = [p for p in pre_split_images_dir.iterdir()
 # print(image_paths)
 # print(type(image_files[0]))
 # time.sleep(10000)
-train_img_paths, val_img_paths = train_test_split(image_paths, test_size=0.2, random_state=42)
+train_img_paths, val_img_paths = train_test_split(image_paths, test_size=TEST_SIZE, random_state=RANDOM_STATE)
 
 def copy_image_and_label(img_path:Path, target_img_dir, target_label_dir):
     shutil.copy2(img_path, target_img_dir / img_path.name)

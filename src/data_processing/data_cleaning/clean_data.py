@@ -4,7 +4,7 @@ import shutil
 # Configuration
 DIRTY_DIR = "./data_processing/_dirty_dataset"
 CLEAN_DIR = "./data_processing/_clean_dataset"
-AREA_THRESHOLD = 0.025 * 0.025  # 0.000625
+AREA_THRESHOLD = 0.000625  # 0.025 * 0.025
 IMAGE_EXTS = ('.jpg', '.png')  # Supported image extensions
 
 # Create clean directory structure

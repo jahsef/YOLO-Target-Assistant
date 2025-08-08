@@ -8,63 +8,83 @@ import sys
 from pathlib import Path
 import cupy as cp
 import numpy as np
-github_dir = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(github_dir / 'Betterercam'))
+github_dir = Path(__file__).parent.parent.parent.parent
+
+sys.path.insert(0, str(github_dir / 'BettererCam'))  # Ensure BettererCam is in sys.path
+print(f'Adding GITHUB DIR:{github_dir / "BettererCam"} to sys.path')
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 # print(betterercam.__file__)
+
+sys.path.insert(0,str(Path.cwd())) 
 
 from data_parsing import targetselector
 from engine import model
 from input import mousemover, inputdetector
 from gui import gui_manager
-from utils import fpstracker
+from src.aimbot.utils import fpstracker
+from src.aimbot.config_loader import ConfigLoader
 
 from argparse import Namespace  
 from screeninfo import get_monitors
 import traceback
-
+import argparse
 
 class Aimbot:
-    def __init__(self):
-
-        self.load_config_file()
+    def __init__(self, config_path):
+        print("Aimbot: Initializing...")
+        self.config = ConfigLoader(config_path)
         self.init_model()
+        print("Aimbot: init_model complete.")
         self.init_monitor()
+        print("Aimbot: init_monitor complete.")
         #i think these have to be after monitor/model init
-        self.load_aim_config()
-        self.load_other_config()
         self.init_input()
+        print("Aimbot: init_input complete.")
         
-        self.gui_manager = gui_manager.GUI_Manager(self.cfg['gui_settings'],self.scanning_hw_capture)
+        self.gui_manager = gui_manager.GUI_Manager(self.config.cfg['gui_settings'],self.scanning_hw_capture)
+        print("Aimbot: GUI_Manager initialized.")
         
-        if self.is_fps_tracked:
+        if self.config.is_fps_tracked:
             self.fps_tracker = fpstracker.FPSTracker()
         
         self.init_camera()
+        print("Aimbot: init_camera complete.")
+
+        self.target_selector = targetselector.TargetSelector(
+            cfg = self.config.cfg,
+            detection_window_dim=self.ads_hw_capture,
+            head_toggle=self.config.head_toggle,
+            target_cls_id=self.config.target_cls_id,
+            crosshair_cls_id=self.config.crosshair_cls_id,
+            max_deltas = self.config.max_deltas,
+            projectile_velocity=self.config.projectile_velocity,
+            base_head_offset=self.config.base_head_offset,
+            screen_hw= (self.screen_y,self.screen_x),
+            zoom = self.config.zoom,
+            hFOV_degrees= self.config.fov,
+            predict_drop=self.config.predict_drop,
+            predict_crosshair = self.config.predict_crosshair
+        )
+        print("Aimbot: target_selector initialized.")
         self.setup_bytetracker()
+        print("Aimbot: setup_bytetracker complete.")
         
-    def load_config_file(self):
-        import json
-        config_path = Path.cwd() / "aimbot_config.json"
-        with open(config_path) as f:
-            self.cfg = json.load(f)
-    
     def init_model(self):
         #working on multi model support (scanning/ads)
-        ads_path = Path.cwd() / self.cfg['model']['ads_dir'] / self.cfg['model']['ads_filename']
+        ads_path = Path.cwd() / self.config.cfg['model']['ads_dir'] / self.config.cfg['model']['ads_filename']
         
         if not ads_path.exists():  
             raise FileNotFoundError(f"ADS model missing: {ads_path}")  
         
-        scanning_path = Path.cwd() / self.cfg['model']['scanning_dir'] / self.cfg['model']['scanning_filename']
+        scanning_path = Path.cwd() / self.config.cfg['model']['scanning_dir'] / self.config.cfg['model']['scanning_filename']
         
         if not scanning_path.exists() or scanning_path == ads_path:
             print(f'SCANNING MODEL PATH DOES NOT EXIST OR SAME AS ADS MODEL, FALLING BACK TO ADS MODEL')
             scanning_path = ads_path
         
         #this capture dimension is only used for pt models, engine models load dimensions internally
-        pt_hw_capture = tuple(self.cfg['model']['pt_hw_capture'])
+        pt_hw_capture = tuple(self.config.cfg['model']['pt_hw_capture'])
         
         #load both models
         #if models are the same, only load 1 model make both regions the same
@@ -81,7 +101,7 @@ class Aimbot:
         
     def init_monitor(self):
         #dynamic monitor settings
-        monitor_idx = 0
+        monitor_idx = self.config.cfg['display_settings']['monitor_idx']
         monitor = get_monitors()[monitor_idx]
         print(f'LOOKING AT MONITOR: {monitor_idx}')
         self.screen_x = monitor.width
@@ -91,8 +111,8 @@ class Aimbot:
 
     
     def init_input(self):
-        self.mousemover = mousemover.MouseMover(self.overall_sens,self.sens_scaling,self.max_deltas,self.jitter_strength,self.overshoot_strength,self.overshoot_chance,self.debug)
-        self.inputdetector = inputdetector.InputDetector(self.debug)
+        self.mousemover = mousemover.MouseMover(self.config.overall_sens,self.config.sens_scaling,self.config.max_deltas,self.config.jitter_strength,self.config.overshoot_strength,self.config.overshoot_chance,self.config.debug)
+        self.inputdetector = inputdetector.InputDetector(self.config.debug, self.config.toggle_hotkey)
         self.inputdetector.start_input_detection()
 
     def init_camera(self):
@@ -126,42 +146,35 @@ class Aimbot:
     
     
     def main(self):     
+        print("Aimbot: Entering main loop.")
         frame_model:model.Model
         try:
             while True:
-                # if not self.inputdetector.is_rmb_pressed:
-                # #     #15ms sleep when not ads
-                #     time.sleep(15e-3)
+                aimbot_active = self.inputdetector.is_toggled and (self.inputdetector.is_rmb_pressed if self.config.right_click_toggle else True)
                 
-                #if rmb pressed, use smaller region else just use main region
+                if not aimbot_active:
+                    time.sleep(self.config.inactive_throttle_ms / 1000)
+                
                 if self.inputdetector.is_rmb_pressed:
                     frame = self.camera.grab(region = self.ads_region)
                     frame_model = self.ads_model
-
                 else:    
-                    #uses default region (scanning)
                     frame = self.camera.grab()
                     frame_model = self.scanning_model
 
                 if frame is None:
-                    #if no fresh frame available from directx frame buffer
                     continue    
 
                 results = frame_model.inference(src = frame) #(n,6)
-                #results are converted into ultralytics boxes already
-                # boxes_results = frame_model.parse_results_into_ultralytics_boxes(results)
                 self.tracker.update(results.cpu().numpy())
                 
-                #could possibly convert somewhere upstream but idk if thats even more efficient
-                #predicts next positions of tracked detections then gets results
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])#(n,8)
                 
-                if self.inputdetector.is_rmb_pressed and len(tracked_detections) > 0:
+                if aimbot_active and len(tracked_detections) > 0:
                     self.aimbot(tracked_detections)
-                    # print(tracked_detections)
                     
-                if self.is_fps_tracked:
+                if self.config.is_fps_tracked:
                     self.fps_tracker.update()
 
                 if self.gui_manager:  
@@ -177,63 +190,22 @@ class Aimbot:
             self.cleanup()
             sys.exit(1)
     
-    def load_other_config(self):
-        #logging
-        self.debug = self.cfg['logging']['debug']
-        self.is_fps_tracked = self.cfg['logging']['fps']
-        
-    def load_aim_config(self):
-        """
-        cfg loading is order dependent so cant change where this method is called really
-        """
-        #sens settings
-        self.overall_sens = self.cfg['sensitivity_settings']['overall_sens']
-        self.sens_scaling = self.cfg['sensitivity_settings']['sens_scaling']
-        self.max_deltas = self.cfg['sensitivity_settings']['max_deltas']
-        self.jitter_strength = self.cfg['sensitivity_settings']['jitter_strength']
-        self.overshoot_strength = self.cfg['sensitivity_settings']['overshoot_strength']
-        self.overshoot_chance = self.cfg['sensitivity_settings']['overshoot_chance']
-        #targeting/ bullet prediction settings
-        #need self scope for debug stuff below
-        self.target_cls_id = self.cfg['targeting_settings']['target_cls_id']
-        self.crosshair_cls_id = self.cfg['targeting_settings']['crosshair_cls_id']
-        head_toggle = self.cfg['targeting_settings']['head_toggle']
-        predict_drop = self.cfg['targeting_settings']['predict_drop']
-        predict_crosshair = self.cfg['targeting_settings']['predict_crosshair']
-        zoom = self.cfg['targeting_settings']['zoom']
-        projectile_velocity = self.cfg['targeting_settings']['projectile_velocity']
-        base_head_offset = self.cfg['targeting_settings']['base_head_offset']
-        fov = self.cfg['targeting_settings']['fov']
-        
-        self.target_selector = targetselector.TargetSelector(
-            detection_window_dim=self.ads_hw_capture,
-            head_toggle=head_toggle,
-            target_cls_id=self.target_cls_id,
-            crosshair_cls_id=self.crosshair_cls_id,
-            max_deltas = self.max_deltas,
-            projectile_velocity=projectile_velocity,
-            base_head_offset=base_head_offset,
-            screen_hw= (self.screen_y,self.screen_x),
-            zoom = zoom,
-            hFOV_degrees= fov,
-            predict_drop=predict_drop,
-            predict_crosshair = predict_crosshair
-        )
-        
-        
     def setup_bytetracker(self):
         #if engine is running just going to assume 144 is the target frame rate
         #if pt model is running its probably debug screen so 30
         target_frame_rate = 144 if self.ads_model.model_ext == ".engine" else 30
-        args = Namespace(
-            track_high_thresh=.65,
-            track_low_thresh=.4,
-            track_buffer=target_frame_rate//2,
-            fuse_score=.5,
-            match_thresh=.6,
-            new_track_thresh=0.65
-        )
+        args = self.config.get_tracker_args(target_frame_rate)
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
+
+    def aimbot(self, detections:np.ndarray):  
+        """
+        Args:
+            detections (np.ndarray):detection array FROM TRACKER of shape (n, 8) where columns are:
+            [x1, y1, x2, y2, track_id, confidence, class_id, strack_idx]
+        """
+        deltas = self.target_selector.get_deltas(detections)
+        if deltas != (0,0):#if valid target
+            self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
 
     def cleanup(self):
         print("STARTING CLEANUP")
@@ -258,17 +230,11 @@ class Aimbot:
             torch.cuda.empty_cache()
         except Exception as e:
             print(f"Cleanup error: {e}")
-            
-    def aimbot(self, detections:np.ndarray):  
-        """
-        Args:
-            detections (np.ndarray):detection array FROM TRACKER of shape (n, 8) where columns are:
-            [x1, y1, x2, y2, track_id, confidence, class_id, strack_idx]
-        """
-        deltas = self.target_selector.get_deltas(detections)
-        if deltas != (0,0):#if valid target
-            self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
 
 
 if __name__ == "__main__":
-    Aimbot().main()
+    parser = argparse.ArgumentParser(description="YOLO11 Aimbot")
+    parser.add_argument('--config', type=str, default='config/cfg.json', help='Path to the configuration file')
+    args = parser.parse_args()
+    print("Aimbot: About to create Aimbot instance and run main.")
+    Aimbot(args.config).main()

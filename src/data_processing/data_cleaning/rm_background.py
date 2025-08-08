@@ -4,6 +4,8 @@ import random
 # Configuration
 DATASET_DIR = os.path.join(os.getcwd(),"data_processing/data_cleaning/_clean_dataset")
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')  # Supported image extensions
+REMOVE_FRACTION = 0.5
+RANDOM_SEED = 42
 
 # Path setup
 images_dir = os.path.join(DATASET_DIR, "images", "train")
@@ -42,13 +44,13 @@ def main():
         return
     
     # Calculate number to remove
-    num_to_remove = len(background_images) // 2
+    num_to_remove = int(len(background_images) * REMOVE_FRACTION)
     if num_to_remove < 1:
         print("Not enough background images to remove (need at least 2)")
         return
     
     # Randomly select images to remove
-    random.seed(42)  # For reproducibility
+    random.seed(RANDOM_SEED)  # For reproducibility
     to_remove = random.sample(background_images, num_to_remove)
     
     # Remove selected images

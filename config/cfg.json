@@ -6,13 +6,20 @@
         "debug": false,
         "fps": true
     },
+    "input_settings": {
+        "toggle_hotkey": "t",
+        "right_click_toggle": true
+    },
     "other": {
-        "throttle_non_ads_ms": 15
+        "inactive_throttle_ms": 30
+    },
+    "display_settings": {
+        "monitor_idx": 0
     },
     "model": {
-        "ads_dir": "models/pf_1550img_11s/weights",
+        "ads_dir": "data/models/pf_1550img_11s/weights",
         "ads_filename": "320x320_stripped.engine",
-        "scanning_dir": "models/pf_1550img_11x/weights",
+        "scanning_dir": "data/models/pf_1550img_11x/weights",
         "scanning_filename": "640x640_stripped.engine",
         "pt_hw_capture": [320, 320]
     },
@@ -34,9 +41,21 @@
         "predict_crosshair": true,
         "predict_drop": true,
         "zoom": 1.5,
-        "projectile_velocity": 2300,
+        "projectile_velocity": 3050,
         "base_head_offset": 0.35,
-        "fov": 80
+        "fov": 80,
+        "gravity": 196.2,
+        "target_real_height": 5,
+        "target_real_width": 3.5,
+        "distance_calibration_factor": 0.45
+    },
+    "tracker_settings": {
+        "track_high_thresh": 0.65,
+        "track_low_thresh": 0.4,
+        "track_buffer_multiplier": 0.5,
+        "fuse_score": 0.5,
+        "match_thresh": 0.6,
+        "new_track_thresh": 0.65
     },
     "gui_settings":{
         "opencv_render": false,

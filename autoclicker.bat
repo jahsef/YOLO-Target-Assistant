@@ -1,1 +1,1 @@
-python "aimbot/input/auto_clicker.py"
+python "src/aimbot/input/auto_clicker.py"

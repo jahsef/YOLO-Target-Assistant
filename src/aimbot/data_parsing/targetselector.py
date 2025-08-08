@@ -5,6 +5,7 @@ class TargetSelector:
     
     def __init__(
             self,
+            cfg: dict,
             detection_window_dim : tuple[int,int],
             screen_hw:tuple[int,int],
             head_toggle : bool,
@@ -19,12 +20,13 @@ class TargetSelector:
             hFOV_degrees:float
  
             ):
+        self.cfg = cfg
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         self.head_toggle = head_toggle
         self.target_cls_id = target_cls_id
         self.crosshair_cls_id = crosshair_cls_id
         self.max_deltas = max_deltas
-        self.GRAVITY = 196.2#THIS VALUE IS ROBLOX DEFAULT studs/s^2
+        self.GRAVITY = self.cfg['targeting_settings']['gravity']#THIS VALUE IS ROBLOX DEFAULT studs/s^2
         self.screen_height = screen_hw[0]
         self.screen_width = screen_hw[1]
         self.projectile_velocity = projectile_velocity
@@ -34,12 +36,12 @@ class TargetSelector:
         self.zoom = zoom
         self.hfov_rad = np.deg2rad(hFOV_degrees)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
-        self.DISTANCE_CONST =.45#calibration const
+        self.DISTANCE_CONST = self.cfg['targeting_settings']['distance_calibration_factor']
         self.debug = False
 
-
-    def _calculate_distance(self, target_height_pixels = None, target_real_height=5,
-                            target_width_pixels= None, target_real_width=3.5):
+    
+    def _calculate_distance(self, target_height_pixels = None, target_real_height=None,
+                            target_width_pixels= None, target_real_width=None):
         """
         Robust distance calculation with perspective-safe head detection and weighted uncertainty.
         """
@@ -51,7 +53,9 @@ class TargetSelector:
         eff_horiz_fov = self.hfov_rad / self.zoom
 
         # 4. Height-based calculation with uncertainty weighting
-        if target_height_pixels and target_real_height:
+        if target_height_pixels:
+            if target_real_height is None:
+                target_real_height = self.cfg['targeting_settings']['target_real_height']
             px_per_rad = self.screen_height / eff_vert_fov
             angular_size = target_height_pixels / px_per_rad
             dist = target_real_height / (2 * math.tan(angular_size / 2))
@@ -60,7 +64,9 @@ class TargetSelector:
             variances.append(angular_size ** 2)
 
         # 5. Width-based calculation (same logic)
-        if target_width_pixels and target_real_width:
+        if target_width_pixels:
+            if target_real_width is None:
+                target_real_width = self.cfg['targeting_settings']['target_real_width']
             px_per_rad = self.screen_width / eff_horiz_fov
             angular_size = target_width_pixels / px_per_rad
             dist = target_real_width / (2 * math.tan(angular_size / 2))
@@ -180,8 +186,24 @@ class TargetSelector:
 
 
 if __name__ == '__main__':#test
-    ts = TargetSelector(detection_window_dim=(320,320),head_toggle=True,target_cls_id=0,crosshair_cls_id=2,
-                        max_deltas = 16,sensitivity=1,zoom=10,projectile_velocity=2000,base_head_offset=.33,screen_hw=(1440,2560),hFOV_degrees=105, rand_sens_mult_std_dev=0, min_sens_mult=0)
+    import json
+    from pathlib import Path
+    config_path = Path.cwd() / "config" / "cfg.json"
+    with open(config_path) as f:
+        cfg = json.load(f)
+    ts = TargetSelector(
+        cfg=cfg,
+        detection_window_dim=(320,320),
+        head_toggle=True,
+        target_cls_id=cfg['targeting_settings']['target_cls_id'],
+        crosshair_cls_id=cfg['targeting_settings']['crosshair_cls_id'],
+        max_deltas = cfg['sensitivity_settings']['max_deltas'],
+        projectile_velocity=cfg['targeting_settings']['projectile_velocity'],
+        base_head_offset=cfg['targeting_settings']['base_head_offset'],
+        screen_hw=(1440,2560),
+        zoom=cfg['targeting_settings']['zoom'],
+        hFOV_degrees=cfg['targeting_settings']['fov']
+    )
     dist = ts._calculate_distance(target_height_pixels=207,target_width_pixels=97)
     print(dist)
     

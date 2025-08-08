@@ -3,6 +3,9 @@ import torch
 import cv2
 from multiprocessing import Process
 
+DEFAULT_CROP_DIM = (640, 640)
+DEFAULT_N_PROCESSES = 16
+
 cwd = os.getcwd()
 images_dir = os.path.join(cwd,'data_processing/converted_videos')
 images_list = os.listdir(images_dir)
@@ -20,7 +23,7 @@ def crop(image_list):
         
         
         original_dim = (image.shape[1],image.shape[0])#wxh
-        crop_dim = (640,640)#wxh
+        crop_dim = DEFAULT_CROP_DIM#wxh
         offset_width = (original_dim[0] - crop_dim[0])//2
         offset_height= (original_dim[1] - crop_dim[1])//2
 

@@ -1,4 +1,8 @@
 import os
+
+BASE_DIR = "data/models/pf_1550img_11x/weights"
+ENGINE_NAME = "640x640.engine"
+
 def strip_metadata(input_file, output_file):
     with open(input_file, "rb") as f:
         # Read the length of the metadata (first 4 bytes)
@@ -16,8 +20,8 @@ def strip_metadata(input_file, output_file):
 
 # Example usage
 cwd = os.getcwd()
-base_dir = "models/pf_1550img_11x/weights"
-engine_name = "640x640.engine"
+base_dir = BASE_DIR
+engine_name = ENGINE_NAME
 stripped_engine_name = engine_name[:engine_name.index('.')] + '_stripped.engine'
 engine_path = os.path.join(cwd,base_dir,engine_name)
 strip_metadata(engine_path, os.path.join(cwd,base_dir,stripped_engine_name))

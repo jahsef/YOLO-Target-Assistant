@@ -1,5 +1,3 @@
-
-
 import sys
 import bettercam#no need for betterercam cupy support
 from screeninfo import get_monitors
@@ -80,4 +78,3 @@ while True:
         time.sleep(1 // target_fps)
     else:
         time.sleep(1 // ambient_fps)#not perfect but close enough
-
