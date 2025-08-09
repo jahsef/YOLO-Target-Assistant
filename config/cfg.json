@@ -11,7 +11,7 @@
         "right_click_toggle": true
     },
     "other": {
-        "inactive_throttle_ms": 30
+        "inactive_throttle_ms": 16
     },
     "display_settings": {
         "monitor_idx": 0
@@ -47,7 +47,8 @@
         "gravity": 196.2,
         "target_real_height": 5,
         "target_real_width": 3.5,
-        "distance_calibration_factor": 0.45
+        "distance_calibration_factor": 0.45,
+        "min_frames_to_target": 4
     },
     "tracker_settings": {
         "track_high_thresh": 0.65,

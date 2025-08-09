@@ -39,6 +39,7 @@ class ConfigLoader:
         self.projectile_velocity = self.cfg['targeting_settings']['projectile_velocity']
         self.base_head_offset = self.cfg['targeting_settings']['base_head_offset']
         self.fov = self.cfg['targeting_settings']['fov']
+        self.min_frames_to_target = self.cfg['targeting_settings']['min_frames_to_target']
 
     def get_tracker_args(self, target_frame_rate):
         return Namespace(

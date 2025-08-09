@@ -97,6 +97,8 @@ class Aimbot:
         else: 
             self.scanning_model = model.Model(scanning_path, hw_capture=pt_hw_capture)
         self.scanning_hw_capture = self.scanning_model.hw_capture
+        self._tracked_buffer = np.empty((256, 8), dtype=np.float32)
+        
         
         
     def init_monitor(self):
@@ -166,17 +168,23 @@ class Aimbot:
                     continue    
 
                 results = frame_model.inference(src = frame) #(n,6)
-                self.tracker.update(results.cpu().numpy())
+                self.tracker.update(results.to('cpu', dtype=torch.float32, non_blocking=True).numpy())
                 
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
-                tracked_detections = np.asarray([x.result for x in self.tracker.tracked_stracks if x.is_activated])#(n,8)
+                #pop stuff into preallocated array
+                count = 0
+                for t in self.tracker.tracked_stracks:
+                    if t.is_activated:
+                        self._tracked_buffer[count] = t.result
+                        count += 1
+                tracked_detections = self._tracked_buffer[:count]
                 
-                if aimbot_active and len(tracked_detections) > 0:
-                    self.aimbot(tracked_detections)
+                if aimbot_active and len(self.tracker.tracked_stracks) > 0:
+                    self.aimbot(self.tracker.tracked_stracks)
                     
                 if self.config.is_fps_tracked:
                     self.fps_tracker.update()
-
+            
                 if self.gui_manager:  
                     self.gui_manager.render(frame, tracked_detections, self.inputdetector.is_rmb_pressed)  
                 
@@ -197,15 +205,21 @@ class Aimbot:
         args = self.config.get_tracker_args(target_frame_rate)
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
 
-    def aimbot(self, detections:np.ndarray):  
+    def aimbot(self, stracks:list):  
         """
         Args:
-            detections (np.ndarray):detection array FROM TRACKER of shape (n, 8) where columns are:
-            [x1, y1, x2, y2, track_id, confidence, class_id, strack_idx]
+            stracks (list): list of STrack objects
         """
-        deltas = self.target_selector.get_deltas(detections)
-        if deltas != (0,0):#if valid target
-            self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
+        
+        # Filter stracks based on min_frames_to_target
+        filtered_stracks = [s for s in stracks if s.frame_id - s.start_frame >= self.config.min_frames_to_target]
+
+        if len(filtered_stracks) > 0:
+            # Convert filtered_stracks back to the numpy array format for target_selector
+            filtered_detections = np.asarray([x.result for x in filtered_stracks if x.is_activated])
+            deltas = self.target_selector.get_deltas(filtered_detections)
+            if deltas != (0,0):#if valid target
+                self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
 
     def cleanup(self):
         print("STARTING CLEANUP")
