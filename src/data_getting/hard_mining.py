@@ -19,9 +19,9 @@ y_offset = (screen_y - hw_capture[0])//2
 capture_region = (0 + x_offset, 0 + y_offset, screen_x - x_offset, screen_y - y_offset)
 camera = bettercam.create(region = capture_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = False)
 frame_counter = 0
-ambient_fps = .15
-target_fps = .75
-output_folder = Path.cwd() / 'data_getting_69/screenshots/'
+ambient_fps = .3
+target_fps = .6
+output_folder = Path.cwd() / 'src/data_getting/screenshots/'
 
 
 # Global variable to track if right-click is held down

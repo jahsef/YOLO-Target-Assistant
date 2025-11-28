@@ -6,13 +6,13 @@ import time
 import numpy as np
 
 class DPGOverlay:
-    def __init__(self,height:int,width:int,only_render_overlay_non_ads:bool):
+    def __init__(self,height:int,width:int,only_render_overlay_non_ads:bool, overlay_render_cls_id:int):
         self.padding = 16
         self.draw_offset = self.padding//2
         self.vp_width = width
         self.vp_height = height
         self.drawlist_tag = "drawing_area"
-        
+        self.overlay_render_cls_id = overlay_render_cls_id
         dpg.create_context()
         self._setup_viewport()
         self._create_window()
@@ -23,8 +23,9 @@ class DPGOverlay:
         self.only_render_overlay_non_ads = only_render_overlay_non_ads
         
         self._start()
-        #count frames of not updated
-        self.frame_count = 0
+
+        #we use this so if not updated within time we manually update to avoid window freeze
+        self.last_updated_time = time.time()
 
     def _setup_viewport(self):
         screen_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
@@ -134,34 +135,48 @@ class DPGOverlay:
 
     def render(self, tracked_detections: np.ndarray, is_rmb_pressed: bool) -> None:
         """render handler for bounding boxes"""
-        self.frame_count += 1
-
-        # force clear every 300 frames if theres no detections
-        if self.frame_count % 300 == 0 and tracked_detections.size == 0:
+        # self.frame_count += 1
+        
+        if tracked_detections.size > 0:
+            #we mask to  only display target class
+            class_mask = tracked_detections[:,6] == self.overlay_render_cls_id
+            masked_detections = tracked_detections[class_mask]
+        else:
+            #if no target class then nothing
+            masked_detections = np.asarray([])
+        
+        # force clear every half second if theres no detections
+        #avoids window freeze issues a lot of the time
+        if (time.time() - self.last_updated_time > 0.5) and masked_detections.size == 0:
+            #force refresh
             self._clear_canvas()
             self._render_frame()
+            self.last_updated_time = time.time()
             return
 
         #get rendering decisions
-        should_draw, should_clear = self._should_render(tracked_detections, is_rmb_pressed)
+        should_draw, should_clear = self._should_render(masked_detections, is_rmb_pressed)
         
         if not should_draw:
+            if should_clear  and self.are_bb_drawn:
+            #no new detection,  need to clear out old
+                self._clear_canvas()
+                self.are_bb_drawn = False
+                self._render_frame()
+                self.last_updated_time = time.time()
             return
-        #need to clear canvas before drawing new bounding boxes
-        self._clear_canvas()
-
-        if should_clear:
-            # Clear existing boxes state
-            self.are_bb_drawn = False
-        elif tracked_detections.size > 0:
-            # Draw all valid detections
+        else:
+            #if we draw, we always clear canvas
+            #if should_draw already takes into account if masked_detections is empty or not
+            self._clear_canvas()
             self.are_bb_drawn = True
-            for detection in tracked_detections:
+            for detection in masked_detections:
                 x1, y1, x2, y2 = map(int, detection[:4])
                 self._draw_bounding_box(x1, y1, x2, y2)
-
+        
         # Push updates to screen
         self._render_frame()
+        self.last_updated_time = time.time()
 
 
     def _should_render(self, tracked_detections: np.ndarray, is_rmb_pressed: bool) -> tuple[bool, bool]:
@@ -177,7 +192,7 @@ class DPGOverlay:
         # Block rendering during ADS if configured
         if self.only_render_overlay_non_ads and is_rmb_pressed:
             if self.are_bb_drawn:
-                return (True, True)  # Force clear existing boxes
+                return (False, True)  # Clear boxes without drawing new ones
             return (False, False)  # No action needed
 
         has_valid_detections = tracked_detections.size > 0

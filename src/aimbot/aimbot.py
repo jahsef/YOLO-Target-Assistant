@@ -34,6 +34,7 @@ class Aimbot:
     def __init__(self, config_path):
         print("Aimbot: Initializing...")
         self.config = ConfigLoader(config_path)
+        self._validate_targeting_config()
         self.init_model()
         print("Aimbot: init_model complete.")
         self.init_monitor()
@@ -42,7 +43,8 @@ class Aimbot:
         self.init_input()
         print("Aimbot: init_input complete.")
         
-        self.gui_manager = gui_manager.GUI_Manager(self.config.cfg['gui_settings'],self.scanning_hw_capture)
+        self.gui_manager = gui_manager.GUI_Manager(config = self.config.cfg,hw_capture = self.scanning_hw_capture)
+
         print("Aimbot: GUI_Manager initialized.")
         
         if self.config.is_fps_tracked:
@@ -69,7 +71,22 @@ class Aimbot:
         print("Aimbot: target_selector initialized.")
         self.setup_bytetracker()
         print("Aimbot: setup_bytetracker complete.")
-        
+
+    def _validate_targeting_config(self):
+        """
+        Validates targeting configuration settings.
+        Raises ValueError if configuration is invalid.
+        """
+        targeting = self.config.cfg.get('targeting_settings', {})
+        lead_target = targeting.get('lead_target', False)
+        predict_drop = self.config.predict_drop
+
+        if lead_target and not predict_drop:
+            raise ValueError(
+                "Invalid targeting configuration: 'lead_target' requires 'predict_drop' to be enabled. "
+                "Please enable 'predict_drop' in your config or disable 'lead_target'."
+            )
+
     def init_model(self):
         #working on multi model support (scanning/ads)
         ads_path = Path.cwd() / self.config.cfg['model']['ads_dir'] / self.config.cfg['model']['ads_filename']
@@ -97,6 +114,7 @@ class Aimbot:
         else: 
             self.scanning_model = model.Model(scanning_path, hw_capture=pt_hw_capture)
         self.scanning_hw_capture = self.scanning_model.hw_capture
+        #buffer for  tracked detections, we move from  
         self._tracked_buffer = np.empty((256, 8), dtype=np.float32)
         
         
@@ -126,13 +144,13 @@ class Aimbot:
         ads_y_offset = (self.scanning_hw_capture[0] - self.ads_hw_capture[0]) // 2
         
         #need to modify for dual region i think later
-        scanning_region = (0 + scanning_x_offset, 0 + scanning_y_offset, self.screen_x - scanning_x_offset, self.screen_y - scanning_y_offset)
+        self.scanning_region = (0 + scanning_x_offset, 0 + scanning_y_offset, self.screen_x - scanning_x_offset, self.screen_y - scanning_y_offset)
         
         self.ads_region = (
-            scanning_region[0] + ads_x_offset,
-            scanning_region[1] + ads_y_offset,
-            scanning_region[2] - ads_x_offset,
-            scanning_region[3] - ads_y_offset
+            self.scanning_region[0] + ads_x_offset,
+            self.scanning_region[1] + ads_y_offset,
+            self.scanning_region[2] - ads_x_offset,
+            self.scanning_region[3] - ads_y_offset
         )
 
         # print(f'ads dimensions: {self.ads_hw_capture}')
@@ -141,7 +159,7 @@ class Aimbot:
         # print(f'scanning region: {scanning_region}')
         
         #by default uses scanning region when ads, use ads region
-        self.camera = betterercam.create(region = scanning_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)
+        self.camera = betterercam.create(region = self.scanning_region, output_color='RGB',max_buffer_len=2, nvidia_gpu = True)
         
         #if using yolo inference need to use BGR since they assume your input is BGR
     
@@ -149,24 +167,36 @@ class Aimbot:
     
     def main(self):     
         print("Aimbot: Entering main loop.")
+        #frame_model  is the specific model we are using for the frame
+        #could be either  ads or scanning model
         frame_model:model.Model
         try:
             while True:
-                aimbot_active = self.inputdetector.is_toggled and (self.inputdetector.is_rmb_pressed if self.config.right_click_toggle else True)
+                aimbot_active = (self.inputdetector.is_toggled and (self.inputdetector.is_rmb_pressed)) or not self.config.right_click_toggle
                 
                 if not aimbot_active:
+                    #throttling so when scanning we dont use all resources
                     time.sleep(self.config.inactive_throttle_ms / 1000)
                 
+                #use either scanning  or ads model
                 if self.inputdetector.is_rmb_pressed:
                     frame = self.camera.grab(region = self.ads_region)
                     frame_model = self.ads_model
+                    w = self.ads_region[2] - self.ads_region[0]
+                    h = self.ads_region[3] - self.ads_region[1]
+                    #might be kinda bloaty to update it constantly but whatever
+                    self.target_selector.update_detection_window_center(window_dim=(w, h))
                 else:    
                     frame = self.camera.grab()
                     frame_model = self.scanning_model
+                    w = self.scanning_region[2] - self.scanning_region[0]
+                    h = self.scanning_region[3] - self.scanning_region[1]
+                    self.target_selector.update_detection_window_center(window_dim=(w, h))
 
+                #capture lib sometimes may return none
                 if frame is None:
                     continue    
-
+                
                 results = frame_model.inference(src = frame) #(n,6)
                 self.tracker.update(results.to('cpu', dtype=torch.float32, non_blocking=True).numpy())
                 
@@ -179,14 +209,21 @@ class Aimbot:
                         count += 1
                 tracked_detections = self._tracked_buffer[:count]
                 
+                raw_deltas = (0,0)
+                scaled_deltas = (0,0)
                 if aimbot_active and len(self.tracker.tracked_stracks) > 0:
-                    self.aimbot(self.tracker.tracked_stracks)
-                    
+                    #print(f'AIMBOT ACTIVE')
+                    raw_deltas, scaled_deltas = self.aimbot(self.tracker.tracked_stracks)
+                
                 if self.config.is_fps_tracked:
                     self.fps_tracker.update()
-            
+                
                 if self.gui_manager:  
-                    self.gui_manager.render(frame, tracked_detections, self.inputdetector.is_rmb_pressed)  
+                    self.gui_manager.render(frame = frame, 
+                                            tracked_detections = tracked_detections, 
+                                            is_rmb_pressed= self.inputdetector.is_rmb_pressed,
+                                            raw_deltas = raw_deltas,
+                                            scaled_deltas = scaled_deltas)  
                 
         except KeyboardInterrupt:
             print("\nShutting down...")
@@ -213,13 +250,18 @@ class Aimbot:
         
         # Filter stracks based on min_frames_to_target
         filtered_stracks = [s for s in stracks if s.frame_id - s.start_frame >= self.config.min_frames_to_target]
-
+        raw_deltas = (0,0)
+        scaled_deltas = (0,0)
         if len(filtered_stracks) > 0:
             # Convert filtered_stracks back to the numpy array format for target_selector
             filtered_detections = np.asarray([x.result for x in filtered_stracks if x.is_activated])
-            deltas = self.target_selector.get_deltas(filtered_detections)
-            if deltas != (0,0):#if valid target
-                self.mousemover.move_mouse_humanized(deltas[0],deltas[1])
+            raw_deltas = self.target_selector.get_deltas(filtered_detections)
+            if raw_deltas != (0,0):#if valid target
+                scaled_deltas = self.mousemover.move_mouse_humanized(raw_deltas[0],raw_deltas[1])
+        if self.config.cfg['targeting_settings']['lead_target']:
+            self.target_selector.update_movement_buffer(scaled_deltas)
+        return raw_deltas, scaled_deltas
+
 
     def cleanup(self):
         print("STARTING CLEANUP")

@@ -27,9 +27,9 @@ class MouseMover:
         """
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, dx = int(dx), dy = int(dy))
     
-    def move_mouse_humanized(self,dx:float,dy:float):
+    def move_mouse_humanized(self,dx:float,dy:float) -> tuple[int, int]:
         """
-        takes raw deltas, scales and humanizes them and moves mouse
+        takes raw deltas, scales and humanizes them and moves mouse, returns scaled deltas too
         """
         scaled_x, scaled_y = self._scale_delta(dx), self._scale_delta(dy)
         humanized_xy = self._humanize_movement(scaled_x,scaled_y)
@@ -37,6 +37,7 @@ class MouseMover:
         if self.debug:
             print(f'moving mouse: {round_x,round_y}')
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, round_x, round_y)
+        return (round_x ,round_y)
         
     # Apply confidence scaling (0.0 to 1.0)
     # smoothed_dx = dx * conf  # Higher conf = stronger aim

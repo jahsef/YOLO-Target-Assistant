@@ -7,30 +7,31 @@
         "fps": true
     },
     "input_settings": {
-        "toggle_hotkey": "t",
+        "toggle_hotkey": "",
+	"IMPORTANT" : "if toggle_hotkey is empty string, then it aimbot cannot be completely turned off",
         "right_click_toggle": true
     },
     "other": {
-        "inactive_throttle_ms": 16
+        "inactive_throttle_ms": 12
     },
     "display_settings": {
         "monitor_idx": 0
     },
     "model": {
-        "ads_dir": "data/models/pf_1550img_11s/weights",
-        "ads_filename": "320x320_stripped.engine",
-        "scanning_dir": "data/models/pf_1550img_11x/weights",
+        "ads_dir": "data/models/combined_test2/weights",
+        "ads_filename": "640x640_stripped.engine",
+        "scanning_dir": "data/models/combined_test2/weights",
         "scanning_filename": "640x640_stripped.engine",
         "pt_hw_capture": [320, 320]
     },
-
+	
     "sensitivity_settings": {
-        "max_deltas": 160,
+        "max_deltas": 300,
         "overall_sens": 0.5,
-        "sens_scaling": 0.25,
+        "sens_scaling": 0.33,
         "jitter_strength": 0.00,
         "overshoot_strength": 0.00,
-        "overshoot_chance": 0.05
+        "overshoot_chance": 0.00	
 
     },
 
@@ -40,14 +41,16 @@
         "head_toggle" : true,
         "predict_crosshair": true,
         "predict_drop": true,
-        "zoom": 1.5,
-        "projectile_velocity": 3050,
-        "base_head_offset": 0.35,
+	"lead_target":true,
+	"prioritize_oldest":true,
+        "zoom":1.1,
+        "projectile_velocity": 1104,
+        "base_head_offset": -0.27,
         "fov": 80,
-        "gravity": 196.2,
+        "gravity": 128, 	
         "target_real_height": 5,
         "target_real_width": 3.5,
-        "distance_calibration_factor": 0.45,
+        "distance_calibration_factor":0.425,
         "min_frames_to_target": 4
     },
     "tracker_settings": {
@@ -55,7 +58,7 @@
         "track_low_thresh": 0.4,
         "track_buffer_multiplier": 0.5,
         "fuse_score": 0.5,
-        "match_thresh": 0.6,
+        "match_thresh": 0.6,	
         "new_track_thresh": 0.65
     },
     "gui_settings":{

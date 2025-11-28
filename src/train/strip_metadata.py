@@ -1,7 +1,7 @@
 import os
 
-BASE_DIR = "data/models/pf_1550img_11x/weights"
-ENGINE_NAME = "640x640.engine"
+BASE_DIR = "data/models/combined_test2/weights"
+ENGINE_NAME = "320x320.engine"
 
 def strip_metadata(input_file, output_file):
     with open(input_file, "rb") as f:
