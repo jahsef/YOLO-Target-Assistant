@@ -10,14 +10,13 @@ class TargetSelector:
             cfg: dict,
             detection_window_dim : tuple[int,int],
             screen_hw:tuple[int,int],
-            zoom:float,  # kept as parameter for future zoom interpolation feature
             fps_tracker: object
             ):
         # Tuning constants
-        self.MOVEMENT_BUFFER_LENGTH = 60 
-        self.JITTER_SCORE_THRESHOLD = 32 #soft gating, handles noise
+        self.MOVEMENT_BUFFER_LENGTH = 48 
+        self.JITTER_SCORE_THRESHOLD = 28 #soft gating, handles noise
         self.WMA_VELOCITY_THRESHOLD = 20 #hard gating, if mouse movement is too fast, target is likely close anyway so turn off momentum leading
-        self.ZERO_RATIO_THRESHOLD = 0.80 #soft gating, handles noise
+        self.ZERO_RATIO_THRESHOLD = 0.75 #soft gating, handles noise
         self.HARMONIC_MOTION_DAMPENING_FACTOR = 0.4
         #we also have cos sim soft gating exponential falloff for handling harmonic motion
 
@@ -32,7 +31,12 @@ class TargetSelector:
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
         self.screen_height = screen_hw[0]
         self.screen_width = screen_hw[1]
-        self.zoom = zoom
+        self.base_zoom = 1.0#i have this here so in case we want to change base zoom for whatever reason
+        self.zoom = self.base_zoom
+        self.final_zoom = cfg['targeting_settings']['zoom']
+        self.zoom_interpolation_frames = cfg['targeting_settings']['zoom_interpolation_frames']
+        self.zoom_progress = 0.0
+        
         self.fps_tracker = fps_tracker
 
         # Load targeting settings from config
@@ -122,7 +126,7 @@ class TargetSelector:
         screen_drop = angular_drop_rad * pixels_per_radian
         return screen_drop
 
-
+    
         
 
     def _get_closest_detection(self,detections:np.ndarray,reference_point:tuple[int,int]) -> tuple:
@@ -205,6 +209,27 @@ class TargetSelector:
         #i think this is the cleanest solution i hope?
         self.buffer.appendleft(scaled_deltas)
     
+    def reset_zoom(self):
+        """resets zoom for when you aren't right clicking anymore"""
+        self.zoom = self.base_zoom
+        self.zoom_progress = 0.0
+        log(f'ZOOM RESET', "DEBUG")
+
+    def update_zoom_interpolation(self):
+        if self.zoom_progress < 1.0:
+            self.zoom_progress += 1.0 / self.zoom_interpolation_frames
+            self.zoom_progress = min(self.zoom_progress, 1.0)
+
+            # Easing functions - uncomment desired curve:
+            # t = self.zoom_progress  # linear
+            # t = self.zoom_progress ** 2  # quadratic ease-in (slow start, fast end)
+            t = self.zoom_progress ** 3  # cubic ease-in
+            # t = 1 - (1 - self.zoom_progress) ** 2  # quadratic ease-out (fast start, slow end)
+            # t = 1 - (1 - self.zoom_progress) ** 3  # cubic ease-out
+
+            self.zoom = self.base_zoom + (self.final_zoom - self.base_zoom) * t
+        log(f'zoom: {self.zoom}', "DEBUG")
+        
     def get_deltas(self,detections:np.ndarray):
         """
         processes detection array of shape (n, 8) where columns are:
@@ -277,8 +302,9 @@ class TargetSelector:
         # print(arr_buffer.shape)
         log(f'zero_ratio: {zero_ratio}', "DEBUG")
         #square root saling makes it more gentle than linear, but not as aggressive as squared
-        lead_sensitivity*= max(0, ((self.ZERO_RATIO_THRESHOLD - zero_ratio)/self.ZERO_RATIO_THRESHOLD)** (1/2) )
-
+        zero_ratio_factor = max(float((self.ZERO_RATIO_THRESHOLD - zero_ratio)/self.ZERO_RATIO_THRESHOLD), 0)
+        lead_sensitivity*= zero_ratio_factor** (1/2)
+        
         diffs = arr_buffer[:-1] - arr_buffer[1:]  # (n-1, 2)
         squared_diffs = diffs ** 2
         jitter_score = np.sqrt(squared_diffs[:, 0].mean() + squared_diffs[:, 1].mean())
@@ -307,7 +333,7 @@ class TargetSelector:
         cos_sim = np.dot(current_movement_xy, previous_movement_xy) / (np.linalg.norm(current_movement_xy)*np.linalg.norm(previous_movement_xy) + 1e-6)
         conflict_magnitude = np.linalg.norm(current_movement_xy - previous_movement_xy)
         scale = max(np.linalg.norm(current_movement_xy), np.linalg.norm(previous_movement_xy))
-        dampening_factor = np.exp((cos_sim-1)*conflict_magnitude / scale * self.HARMONIC_MOTION_DAMPENING_FACTOR)
+        dampening_factor = np.exp((cos_sim-1)*conflict_magnitude / (scale + 1e-6) * self.HARMONIC_MOTION_DAMPENING_FACTOR)
         lead_sensitivity *= dampening_factor 
         
         #BELOW IS USED FOR DEBUG INFO FOR GRAPHING LEAVE COMMENTED

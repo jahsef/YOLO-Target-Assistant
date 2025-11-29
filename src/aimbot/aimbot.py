@@ -64,7 +64,6 @@ class Aimbot:
             cfg=self.cfg,
             detection_window_dim=self.ads_hw_capture,
             screen_hw=(self.screen_y, self.screen_x),
-            zoom=self.cfg['targeting_settings']['zoom'],
             fps_tracker = self.fps_tracker
         )
         log("target_selector initialized", "INFO")
@@ -219,6 +218,11 @@ class Aimbot:
                 
                 raw_deltas = (0,0)
                 scaled_deltas = (0,0)
+                if self.inputdetector.is_rmb_pressed:
+                    self.target_selector.update_zoom_interpolation()#while right clicking we interpolate zoom till final zoom level
+                else:
+                    self.target_selector.reset_zoom()
+                    
                 if aimbot_active and len(self.tracker.tracked_stracks) > 0:
                     #print(f'AIMBOT ACTIVE')
                     raw_deltas, scaled_deltas = self.aimbot(self.tracker.tracked_stracks)
