@@ -5,8 +5,9 @@ from typing import Optional
 
 import dearpygui.dearpygui as dpg
 import ctypes
-from ctypes import wintypes 
+from ctypes import wintypes
 from . import dpgoverlay, opencvgui
+from ..utils.utils import log
 
 
 
@@ -26,7 +27,7 @@ class GUI_Manager:
         window_height, window_width = hw_capture  
         only_render_overlay_non_ads = self.gui_settings["only_render_overlay_non_ads"]
         self.overlay_render_cls_id = overlay_render_cls_id
-        print(f'starting gui manager, opencv: {self.opencv_enabled}, dpg: {self.dpg_enabled}')
+        log(f'starting gui manager, opencv: {self.opencv_enabled}, dpg: {self.dpg_enabled}', "INFO")
         
         if not self.opencv_enabled and not self.dpg_enabled:
             return None

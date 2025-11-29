@@ -3,8 +3,8 @@
     "IMPORTANT2": "pt_hw_capture only for pytorch models",
     "IMPORTANT3": "if scanning_model is invalid or the same as ads model then only ads model will be used",
     "logging": {
-        "debug": false,
-        "fps": true
+        "logging_level": "INFO",
+        "print_fps": true
     },
     "input_settings": {
         "toggle_hotkey": "",
@@ -27,8 +27,8 @@
 	
     "sensitivity_settings": {
         "max_deltas": 300,
-        "overall_sens": 0.5,
-        "sens_scaling": 0.33,
+        "overall_sens": 0.42,
+        "sens_scaling": 0.15,
         "jitter_strength": 0.00,
         "overshoot_strength": 0.00,
         "overshoot_chance": 0.00	
@@ -43,23 +43,10 @@
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
-        "zoom":1.1,
-        "projectile_velocity": 1104,
-        "base_head_offset": -0.27,
-        "fov": 80,
-        "gravity": 128, 	
-        "target_real_height": 5,
-        "target_real_width": 3.5,
-        "distance_calibration_factor":0.425,
+        "zoom":5.5,
+        "projectile_velocity": 1500,
+        "base_head_offset": 0.35,
         "min_frames_to_target": 4
-    },
-    "tracker_settings": {
-        "track_high_thresh": 0.65,
-        "track_low_thresh": 0.4,
-        "track_buffer_multiplier": 0.5,
-        "fuse_score": 0.5,
-        "match_thresh": 0.6,	
-        "new_track_thresh": 0.65
     },
     "gui_settings":{
         "opencv_render": false,

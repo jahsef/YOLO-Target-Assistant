@@ -4,6 +4,7 @@ import win32con
 import win32api
 import time
 import numpy as np
+from ..utils.utils import log
 
 class DPGOverlay:
     def __init__(self,height:int,width:int,only_render_overlay_non_ads:bool, overlay_render_cls_id:int):
@@ -119,7 +120,7 @@ class DPGOverlay:
             )
             win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(0, 0, 0), 0, win32con.LWA_COLORKEY)
         else:
-            print("Window handle not found!")
+            log("Window handle not found!", "WARNING")
 
     def _start(self):
         dpg.setup_dearpygui()

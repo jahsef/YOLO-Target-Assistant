@@ -3,15 +3,16 @@ import win32con
 import random
 import math
 import logging
+from ..utils.utils import log
 
 class MouseMover:
-    def __init__(self,overall_sens:float,sens_scaling:float,max_deltas:int,jitter_strength:float,overshoot_strength:float,overshoot_chance:float,debug = False):
+    def __init__(self,overall_sens:float,sens_scaling:float,max_deltas:int,jitter_strength:float,overshoot_strength:float,overshoot_chance:float):
         """_summary_
 
         Args:
             sensitivity (_type_): sensitivity 0-2 (more than 2 not recommended)
             max_deltas (_int_): max pixels to move
-            
+
         """
         self.overall_sens = overall_sens
         self.sens_scaling = sens_scaling
@@ -19,7 +20,6 @@ class MouseMover:
         self.jitter_strength = jitter_strength
         self.overshoot_strength = overshoot_strength
         self.overshoot_chance = overshoot_chance
-        self.debug = debug
     
     def move_mouse_raw(self,dx:int,dy:int):
         """
@@ -34,8 +34,7 @@ class MouseMover:
         scaled_x, scaled_y = self._scale_delta(dx), self._scale_delta(dy)
         humanized_xy = self._humanize_movement(scaled_x,scaled_y)
         round_x, round_y = round(humanized_xy[0]), round(humanized_xy[1])
-        if self.debug:
-            print(f'moving mouse: {round_x,round_y}')
+        log(f'moving mouse: {round_x,round_y}', "DEBUG")
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, round_x, round_y)
         return (round_x ,round_y)
         

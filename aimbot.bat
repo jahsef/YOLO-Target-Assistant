@@ -1,3 +1,3 @@
 @echo off
-python "src/aimbot/aimbot.py" --config "config/cfg.json"
+python -m src.aimbot.aimbot --config "config/cfg.json"
 pause

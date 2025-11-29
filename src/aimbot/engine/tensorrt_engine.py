@@ -5,6 +5,7 @@ import tensorrt as trt
 import numpy as np
 import cupy as cp
 # import pycuda.cuda as cuda
+from ..utils.utils import log
 
 
 
@@ -33,7 +34,7 @@ class TensorRT_Engine:
         self.input_shape = self.engine.get_tensor_shape(self.input_tensor_name)
         self.output_shape = self.engine.get_tensor_shape(self.output_tensor_name)
         self.imgsz = self.input_shape[2:]
-        print(f'engine imgsz: {self.imgsz}')
+        log(f'engine imgsz: {self.imgsz}', "INFO")
         self.input_dtype = self.engine.get_tensor_dtype(self.input_tensor_name)
         self.output_dtype = self.engine.get_tensor_dtype(self.output_tensor_name)
         
@@ -51,7 +52,7 @@ class TensorRT_Engine:
 
         
     def _load_engine(self, engine_file_path: str) -> trt.ICudaEngine:
-        print(f'Reading engine file from: {engine_file_path}')
+        log(f'Reading engine file from: {engine_file_path}', "INFO")
         with open(engine_file_path, "rb") as f:
             runtime = trt.Runtime(self.TRT_LOGGER)
             return runtime.deserialize_cuda_engine(f.read())
@@ -127,13 +128,13 @@ if __name__ == '__main__':
     img /= 255.0 
     np_img = np.ascontiguousarray(img)
     
-    cp_img = cp.asarray(np_img) 
-    print(f'cp shape: {cp_img.shape}')
+    cp_img = cp.asarray(np_img)
+    log(f'cp shape: {cp_img.shape}', "INFO")
     output = model.inference_cp(cp_img)
-    print("Output shape:", output.shape)
+    log(f"Output shape: {output.shape}", "INFO")
     batch_idx = 0
     detection_idx = 0
-    print(output)
+    log(f'output: {output}', "INFO")
 
     # warmpsudps
     for _ in range(128):
@@ -141,7 +142,7 @@ if __name__ == '__main__':
         # print(cp_img.data.ptr)
         output = model.inference_cp(cp_img)
         # print("Output shape:", output.shape)
-        print(output)
+        log(f'output: {output}', "INFO")
         # output = None
         # cp_img = None
 
@@ -153,6 +154,6 @@ if __name__ == '__main__':
         start = time.perf_counter()
         for _ in range(inferences):
             results = model.inference_cp(cp_img)
-        print(f"Inference/s: {inferences / (time.perf_counter() - start):.2f}")
-    print(f'avg inference / s: {iterations*inferences / (time.perf_counter() - fart)}')
+        log(f"Inference/s: {inferences / (time.perf_counter() - start):.2f}", "INFO")
+    log(f'avg inference / s: {iterations*inferences / (time.perf_counter() - fart)}', "INFO")
 
