@@ -2,8 +2,6 @@ from pathlib import Path
 from . import tensorrt_engine
 import cupy as cp
 import torch
-from ultralytics.engine.results import Boxes
-from ultralytics.engine.results import Results
 import numpy as np
 
 class Model:
@@ -13,44 +11,34 @@ class Model:
         Args:
             model_path (Path): path to your model lol
             hw_capture (tuple[int,int]): THIS IS ONLY USED FOR NON ENGINE MODELS, ENGINE MODELS DETERMINE IMGSZ AUTOMATICALLY BASED ON EXPORT SETTINGS
-        
+
         Returns:
-            model object 
+            model object
         """
         self.model = None
         self._load_model(model_path=model_path,hw_capture=hw_capture)
-        self.empty_boxes = Boxes(boxes=torch.empty((0, 6)), orig_shape=self.hw_capture)
-    
-    def _parse_results_into_ultralytics_boxes(self,results: object) -> Boxes:
-        """_summary_
 
+    def _parse_results(self, results: object) -> np.ndarray:
+        """
         Args:
-            results (object): results from model inference (cp,np etc.)
+            results (object): results from model inference (cp, np, torch, or ultralytics Results list)
 
         Returns:
-            Boxes: results in Ultralytics Boxes format, used for Ultralytics BYTETracker
+            np.ndarray: (n, 6) CPU float32 array [x1, y1, x2, y2, conf, cls_id]
         """
-
-        #need to convert into boxes to pass into the ultralytics BYTETracker
-        #xyxy, conf, cls, smth else?
 
         if type(results) is list:
             # print('the correct thing runs now')
-            return results[0].boxes
+            return results[0].boxes.data.cpu().numpy().astype(np.float32)
 
         if len(results) == 0:
-            return self.empty_boxes
+            return np.empty((0, 6), dtype=np.float32)
 
         if type(results) is not torch.Tensor:
             results = torch.as_tensor(results)
 
+        return results.to('cpu', dtype=torch.float32).numpy()
 
-        converted_boxes = Boxes(
-            boxes=results,
-            orig_shape=self.hw_capture
-        )
-        return converted_boxes
-    
     def _load_model(self, model_path: Path, hw_capture:tuple[int,int]):
         self.model_ext = model_path.suffix
         if self.model_ext == '.engine':
@@ -64,17 +52,16 @@ class Model:
             self.model = YOLO(model = model_path)
         else:
             raise Exception(f'not supported file format: {self.model_ext} <- file format should be here lol')
-    
-    def inference(self,src:cp.ndarray) -> any:
+
+    def inference(self,src:cp.ndarray) -> np.ndarray:
         """
         Args:
             src (cp.ndarray): source image in CuPy array, should be hwc
-        
+
         Returns:
-            Ultralytics Boxes results which were originally Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
-            
+            np.ndarray: (n, 6) CPU float32 array [x1, y1, x2, y2, conf, cls_id]
+
         """
-        
 
         if self.model_ext == '.engine':
             #Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
@@ -84,7 +71,7 @@ class Model:
         else:
             raise Exception('big no no happened this should never execute, model was probably not loaded correctly')
 
-        return self._parse_results_into_ultralytics_boxes(results)
+        return self._parse_results(results)
 
 
     def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:
@@ -96,9 +83,9 @@ class Model:
     def _preprocess_torch(self, frame: cp.ndarray) -> torch.Tensor:
         return torch.as_tensor(self._preprocess_cp(frame))
 
-    
+
     @torch.inference_mode()
-    def _inference_torch(self,source:torch.Tensor) -> Boxes:
+    def _inference_torch(self,source:torch.Tensor):
         results = self.model(source=source,
             conf = .25,
             imgsz=self.hw_capture,
@@ -122,5 +109,5 @@ if __name__ == '__main__':
     frame_cp = cp.asarray(np.random.randint(0, 255, (H, W, 3), dtype=np.uint8))
 
     result = model.inference(frame_cp)
-    print(f"output shape: {result.data.shape}")
-    print(f"output: {result.data}")
+    print(f"output shape: {result.shape}")
+    print(f"output: {result}")

@@ -206,7 +206,7 @@ class Aimbot:
                     continue    
                 
                 results = frame_model.inference(src = frame) #(n,6)
-                self.tracker.update(results.to('cpu', dtype=torch.float32, non_blocking=True).numpy())
+                self.tracker.update(results)
                 
                 BYTETracker.multi_predict(self.tracker,self.tracker.tracked_stracks)
                 #pop stuff into preallocated array
@@ -265,7 +265,7 @@ class Aimbot:
         # Monkey-patch with Rust based tracker
         tracker = ByteTrack(max_age=5, min_hits=2, init_tracker_min_score=0.25)
         def update(self, dets, *args, **kwargs):
-            boxes, cls = dets.data[:,:5], dets.data[:, -1:]
+            boxes, cls = dets[:,:5], dets[:, -1:]
             tracks = tracker.update(boxes, return_indices=True)
             idxs = tracks[:, -1:].astype(int)
             confs = boxes[idxs.flatten(), 4:5]
