@@ -1,7 +1,35 @@
 import numpy as np
 import math
-from collections import deque, OrderedDict
+from collections import OrderedDict
 from ..utils.utils import log
+
+
+class RingBuffer2D:
+    """Pre-allocated (capacity, 2) ring buffer. O(1) push, no per-frame allocation."""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.buf = np.zeros((capacity, 2), dtype=np.float64)
+        self.idx = 0  # next write slot
+
+    def push(self, x: float, y: float):
+        self.buf[self.idx, 0] = x
+        self.buf[self.idx, 1] = y
+        self.idx = (self.idx + 1) % self.capacity
+
+    def ordered(self) -> np.ndarray:
+        """(capacity, 2) copy ordered most-recent-first."""
+        return np.roll(self.buf, -self.idx, axis=0)[::-1]
+        
+    @property
+    def newest(self) -> np.ndarray:
+        """Most recent entry as (2,) array."""
+        return self.buf[(self.idx - 1) % self.capacity]
+
+    def decay(self, factor: float):
+        """Multiply all entries by factor (e.g. target switch momentum decay)."""
+        self.buf *= factor
+
 
 class TargetSelector:
     
@@ -14,16 +42,19 @@ class TargetSelector:
             ):
         # Tuning constants
         #for lead (momentum based leading)
-        self.MOVEMENT_BUFFER_LENGTH = 48 
-        self.JITTER_SCORE_THRESHOLD = 28 #soft gating, handles noise
-        self.WMA_VELOCITY_THRESHOLD = 20 #hard gating, if mouse movement is too fast, target is likely close anyway so turn off momentum leading
+        self.MOVEMENT_BUFFER_LENGTH = 64 
+        self.JITTER_SCORE_THRESHOLD = 32 #soft gating, handles noise
+        self.WMA_VELOCITY_THRESHOLD = 50 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
         self.ZERO_RATIO_THRESHOLD = 0.75 #soft gating, handles noise
-        self.HARMONIC_MOTION_DAMPENING_FACTOR = 0.4
+        self.HARMONIC_MOTION_DAMPENING_FACTOR = 0.40 #higher dampens harder
         #we also have cos sim soft gating exponential falloff for handling harmonic motion
-        self.BASE_LEAD_SENS = 0.5 #0.5 seems to be the optimal momentum for leading shots
+        self.BASE_LEAD_SENS = 0.25 # 
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
         self.LEAD_Y_SCALE = 1.0#may want to lessen y momentum sometimes tbh
+        self.COS_SIM_WINDOW = 8 # number of recent frames for harmonic dampening cos_sim
+        self.LEAD_SENS_EMA_ALPHA = 0.15 # EMA smoothing for lead_sensitivity (lower = smoother)
+        self._lead_sens_ema = self.BASE_LEAD_SENS
         
         # Physics and targeting constants
         self.FOV_DEGREES = 80
@@ -60,10 +91,8 @@ class TargetSelector:
         self.hfov_rad = np.deg2rad(self.FOV_DEGREES)
         self.vfov_rad = 2 * np.arctan(np.tan(self.hfov_rad/2) * (self.screen_height/self.screen_width))
 
-        self.buffer = deque(maxlen=self.MOVEMENT_BUFFER_LENGTH)
-        for i in range(self.buffer.maxlen):
-            self.buffer.appendleft((0,0))#dummy
-        self.weights = np.arange(len(self.buffer)+1,1 ,-1)  # [n,n-1,., 1]
+        self.buffer = RingBuffer2D(self.MOVEMENT_BUFFER_LENGTH)
+        self.weights = np.arange(self.MOVEMENT_BUFFER_LENGTH, 0, -1, dtype=np.float64)  # [n,n-1,...,1]
         self.weights = self.weights / self.weights.sum()  # normalize
         # self.jitter_relu_breakpoint = 5#5 or greater counts as 'jitter'
         #1.5 pixels avg jitter /frame pretyty conservative
@@ -232,7 +261,7 @@ class TargetSelector:
     def update_movement_buffer(self, scaled_deltas:tuple[int,int]):
         #okay so currently this is called in aimbot.aimbot() after it gets scaled deltas from mouse movement humanizer thing
         #i think this is the cleanest solution i hope?
-        self.buffer.appendleft(scaled_deltas)
+        self.buffer.push(scaled_deltas[0], scaled_deltas[1])
     
     def reset_zoom(self):
         """resets zoom for when you aren't right clicking anymore"""
@@ -285,8 +314,7 @@ class TargetSelector:
             aim_y -= h * self.base_head_offset
         
 
-        lead_pixels_x = 0
-        lead_pixels_y = 0
+
         if self.predict_drop:
             predicted_dist = self._calculate_distance(target_height_pixels=h, target_width_pixels=w)
             predicted_bullet_travel_time = self._calculate_travel_time(predicted_dist)
@@ -300,9 +328,9 @@ class TargetSelector:
                 unscaled_deltas = self._get_deltas((aim_x, aim_y), crosshair_xy=crosshair)
                 target_id = highest_prio_enemy_detection[4]
                 lead_pixels_x, lead_pixels_y = self.lead_target(predicted_bullet_travel_time=predicted_bullet_travel_time, unscaled_deltas=unscaled_deltas, target_id=target_id)
-                
-        aim_x += lead_pixels_x#sort of acts like a momentum factor while also leading shots
-        aim_y += lead_pixels_y
+        
+                aim_x += lead_pixels_x#sort of acts like a momentum factor while also leading shots
+                aim_y += lead_pixels_y
         
         aim_xy = (aim_x, aim_y) #since tuples immutable
         deltas = self._get_deltas(aim_xy,crosshair)
@@ -314,6 +342,7 @@ class TargetSelector:
         log(f'deltas: {deltas}', "DEBUG")
 
         return deltas
+    
     def lead_target(self, predicted_bullet_travel_time:int, unscaled_deltas:tuple[float,float], target_id:int):
         """
         Calculates lead offset based on tracked mouse velocity
@@ -323,90 +352,133 @@ class TargetSelector:
         if tracking is too unstable, return (0,0) which is lead_x, lead_y
         """
         # Target switch detection - decay old momentum when switching targets
-        # 
         if target_id != self.last_target_id:
-            decay = self.TARGET_SWITCH_DECAY
-            for i in range(len(self.buffer)):
-                self.buffer[i] = (self.buffer[i][0] * decay, self.buffer[i][1] * decay)
+            self.buffer.decay(self.TARGET_SWITCH_DECAY)
             log(f'target switch detected: {self.last_target_id} -> {target_id}, decayed buffer', "DEBUG")
             self.last_target_id = target_id
 
-        arr_buffer = np.asarray(self.buffer)
-        zero_ratio = np.sum(np.all(arr_buffer == 0, axis=1)) / len(arr_buffer)
+        arr_buffer = self.buffer.ordered()
+        zero_ratio = np.sum(np.all(arr_buffer == 0, axis=1)) / self.MOVEMENT_BUFFER_LENGTH
         lead_sensitivity = self.BASE_LEAD_SENS
         # print(arr_buffer.shape)
         log(f'zero_ratio: {zero_ratio}', "DEBUG")
-        #square root saling makes it more gentle than linear, but not as aggressive as squared
-        zero_ratio_factor = max(float((self.ZERO_RATIO_THRESHOLD - zero_ratio)/self.ZERO_RATIO_THRESHOLD), 0)
-        lead_sensitivity*= zero_ratio_factor** (1/2)
-        
+        #square root scaling makes it more gentle than linear, but not as aggressive as squared
+        zero_ratio_factor = max(float((self.ZERO_RATIO_THRESHOLD - zero_ratio)/self.ZERO_RATIO_THRESHOLD), 0) ** (1/2)
+
         diffs = arr_buffer[:-1] - arr_buffer[1:]  # (n-1, 2)
         squared_diffs = diffs ** 2
         jitter_score = np.sqrt(squared_diffs[:, 0].mean() + squared_diffs[:, 1].mean())
-        log(f'jitter_score: {jitter_score}', "DEBUG")
-        #linear scaling with zero ratio
-        
-        lead_sensitivity*= max(0, ((self.JITTER_SCORE_THRESHOLD - jitter_score)/self.JITTER_SCORE_THRESHOLD)**(1/2))
-        #if we have low enough jitter (signaling we are tracking a target) we can actually applying leading
+        jitter_factor = max(0, ((self.JITTER_SCORE_THRESHOLD - jitter_score)/self.JITTER_SCORE_THRESHOLD)**(1/2))
+
         wma_velocity_x = (arr_buffer[:, 0] * self.weights).sum()
         wma_velocity_y = (arr_buffer[:, 1] * self.weights).sum()
         wma_velocity = (wma_velocity_x**2 + wma_velocity_y**2)**(0.5)
-        log(f'wma_velocity: {wma_velocity}', "DEBUG")
-        if wma_velocity > self.WMA_VELOCITY_THRESHOLD:
-            return(0,0)
-        
-        
-        
-        #if its greater we dont run
-        #convert x and y from pixel space to real space
-        
+        # soft gate: linear ramp from 1.0 at half threshold to 0.0 at full threshold
+        wma_factor = max(0.0, min(1.0, 2.0 * (1.0 - wma_velocity / self.WMA_VELOCITY_THRESHOLD)))
+
         lead_pixels_x = wma_velocity_x * self.fps_tracker.get_fps() * predicted_bullet_travel_time #pixels/frame * frames/s * s => pixels
         lead_pixels_y = wma_velocity_y * self.fps_tracker.get_fps() * predicted_bullet_travel_time
         current_movement_xy = np.asarray(a = (unscaled_deltas[0] + lead_pixels_x,unscaled_deltas[1] + lead_pixels_y))
-        previous_movement_xy = np.asarray(self.buffer[0])
         #cos sim harmonic damping
-        cos_sim = np.dot(current_movement_xy, previous_movement_xy) / (np.linalg.norm(current_movement_xy)*np.linalg.norm(previous_movement_xy) + 1e-6)
-        conflict_magnitude = np.linalg.norm(current_movement_xy - previous_movement_xy)
-        scale = max(np.linalg.norm(current_movement_xy), np.linalg.norm(previous_movement_xy))
+        recent_frames = arr_buffer[:self.COS_SIM_WINDOW]
+        dots = recent_frames @ current_movement_xy
+        norms = np.linalg.norm(recent_frames, axis=1) * np.linalg.norm(current_movement_xy) + 1e-6
+        cos_sim = (dots / norms).mean()
+        conflict_magnitude = np.linalg.norm(current_movement_xy - recent_frames[0])
+        scale = max(np.linalg.norm(current_movement_xy), np.linalg.norm(recent_frames[0]))
         dampening_factor = np.exp((cos_sim-1)*conflict_magnitude / (scale + 1e-6) * self.HARMONIC_MOTION_DAMPENING_FACTOR)
-        lead_sensitivity *= dampening_factor 
-        
-        #BELOW IS USED FOR DEBUG INFO FOR GRAPHING LEAVE COMMENTED
-        # with open('dampening_factors.csv', 'a') as f:
-        #     f.write(f'{dampening_factor},{lead_sensitivity}\n')
-        
-            
-        log(f'cos_sim between prev and current movement vectors: {cos_sim}', "DEBUG")
 
-        log(f'final lead_sensitivity: {lead_sensitivity}', "DEBUG")
-        log(f'raw lead_pixels_x: {lead_pixels_x}', "DEBUG")
-        log(f'raw lead_pixels_y: {lead_pixels_y}', "DEBUG")
-        log(f'predicted_bullet_travel_time: {predicted_bullet_travel_time}', "DEBUG")
+        # combine all multipliers
+        raw_lead_sens = lead_sensitivity * zero_ratio_factor * jitter_factor * dampening_factor * wma_factor
+        
+        # EMA smoothing to stabilize lead_sensitivity across frames
+        self._lead_sens_ema += self.LEAD_SENS_EMA_ALPHA * (raw_lead_sens - self._lead_sens_ema)
+        lead_sensitivity = self._lead_sens_ema
+
+        #BELOW IS USED FOR DEBUG INFO FOR GRAPHING LEAVE COMMENTED
+        with open('dampening_factors.csv', 'a') as f:
+            f.write(f'{zero_ratio_factor},{jitter_factor},{dampening_factor},{wma_factor},{raw_lead_sens},{lead_sensitivity},{wma_velocity},{cos_sim},{jitter_score},{zero_ratio},{lead_pixels_x},{lead_pixels_y},{unscaled_deltas[0]},{unscaled_deltas[1]}\n')
+
         lead_sensitivity_x = lead_sensitivity*self.LEAD_X_SCALE
         lead_sensitivity_y = lead_sensitivity*self.LEAD_Y_SCALE
-        log(f'lead_sensitivity_x: {lead_sensitivity_x}', "DEBUG")
-        log(f'lead_sensitivity_y: {lead_sensitivity_y}', "DEBUG")
         return (lead_pixels_x* lead_sensitivity_x, lead_pixels_y * lead_sensitivity_y)
 
-if __name__ == '__main__':#test
+if __name__ == '__main__':
+    # python -m src.aimbot.data_parsing.targetselector
+    import time
     import json
     from pathlib import Path
+
     config_path = Path.cwd() / "config" / "cfg.json"
     with open(config_path) as f:
         cfg = json.load(f)
-    ts = TargetSelector(
-        cfg=cfg,
-        detection_window_dim=(320,320),
-        head_toggle=True,
-        target_cls_id=cfg['targeting_settings']['target_cls_id'],
-        crosshair_cls_id=cfg['targeting_settings']['crosshair_cls_id'],
-        max_deltas = cfg['sensitivity_settings']['max_deltas'],
-        projectile_velocity=cfg['targeting_settings']['projectile_velocity'],
-        base_head_offset=cfg['targeting_settings']['base_head_offset'],
-        screen_hw=(1440,2560),
-        zoom=cfg['targeting_settings']['zoom'],
-        hFOV_degrees=cfg['targeting_settings']['fov']
-    )
-    dist = ts._calculate_distance(target_height_pixels=207,target_width_pixels=97)
-    log(f'dist: {dist}', "INFO")
-    
+
+    class FakeFPS:
+        def get_fps(self): return 144.0
+
+    ts = TargetSelector(cfg=cfg, detection_window_dim=(640, 640), screen_hw=(1440, 2560), fps_tracker=FakeFPS())
+
+    # fake detections: 5 enemies + 1 crosshair, (n, 8) [x1,y1,x2,y2,track_id,conf,cls_id,strack_idx]
+    detections = np.array([
+        [100, 200, 130, 260, 1, 0.9, 0, 0],
+        [300, 150, 340, 230, 2, 0.85, 0, 1],
+        [200, 300, 225, 355, 3, 0.7, 0, 2],
+        [400, 100, 430, 170, 4, 0.8, 0, 3],
+        [150, 250, 180, 310, 5, 0.75, 0, 4],
+        [318, 318, 322, 322, 6, 0.95, 2, 5],
+    ], dtype=np.float32)
+
+    # fill buffer with some movement data
+    for i in range(48):
+        ts.buffer.push(np.sin(i * 0.3) * 2, np.cos(i * 0.3) * 1.5)
+
+    N_SAMPLES = 256
+    N_ITERS = 512
+
+    def bench(name, fn):
+        sprints = np.empty(N_SAMPLES)
+        for s in range(N_SAMPLES):
+            t0 = time.perf_counter_ns()
+            for _ in range(N_ITERS):
+                fn()
+            sprints[s] = (time.perf_counter_ns() - t0) / N_ITERS / 1e3
+        mean = sprints.mean()
+        std = sprints.std(ddof=1)
+        ci95 = 1.96 * std / np.sqrt(N_SAMPLES)
+        print(f"  {name:<35}: {mean:7.2f} ±{std:5.2f} µs  CI95=[{mean-ci95:.2f}, {mean+ci95:.2f}]")
+
+    enemy_dets = detections[detections[:, 6] == 0]
+    crosshair = (320, 320)
+
+    print(f"TargetSelector benchmarks  ({N_SAMPLES} sprints × {N_ITERS} iters)\n")
+
+    bench("RingBuffer2D.push",             lambda: ts.buffer.push(1.0, 2.0))
+    bench("RingBuffer2D.ordered",          lambda: ts.buffer.ordered())
+    bench("RingBuffer2D.decay",            lambda: ts.buffer.decay(0.3))
+    bench("_get_closest_detection",        lambda: ts._get_closest_detection(enemy_dets, crosshair))
+    bench("_get_highest_priority_target",  lambda: ts._get_highest_priority_target(enemy_dets, crosshair))
+    bench("_calculate_distance",           lambda: ts._calculate_distance(target_height_pixels=60, target_width_pixels=30))
+    bench("_get_crosshair",               lambda: ts._get_crosshair(detections))
+    bench("get_deltas",                    lambda: ts.get_deltas(detections))
+    bench("lead_target",                   lambda: ts.lead_target(predicted_bullet_travel_time=0.05, unscaled_deltas=(3.0, -2.0), target_id=1))
+
+    # ── lead_target internals breakdown ──
+    print(f"\nlead_target internals:\n")
+    arr_buf = ts.buffer.ordered()
+    diffs = arr_buf[:-1] - arr_buf[1:]
+    current_xy = np.array([5.0, -3.0])
+    current_norm = np.linalg.norm(current_xy)
+    recent = arr_buf[:8]
+
+    bench("  ordered()",                     lambda: ts.buffer.ordered())
+    bench("  zero_ratio",                    lambda: np.sum(np.all(arr_buf == 0, axis=1)))
+    bench("  jitter (diffs+sqrt+mean)",      lambda: np.sqrt((diffs**2)[:, 0].mean() + (diffs**2)[:, 1].mean()))
+    bench("  wma dot product",               lambda: (arr_buf[:, 0] * ts.weights).sum())
+    def _cos_sim_vec():
+        dots = recent @ current_xy
+        norms = np.linalg.norm(recent, axis=1) * current_norm + 1e-6
+        return (dots / norms).mean()
+    bench("  cos_sim (8-frame vectorized)",  _cos_sim_vec)
+    bench("  np.linalg.norm (single)",       lambda: np.linalg.norm(current_xy))
+    bench("  np.dot (single 2d)",            lambda: np.dot(current_xy, recent[0]))
+    bench("  np.exp (dampening)",            lambda: np.exp(-0.5))

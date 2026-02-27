@@ -43,9 +43,9 @@
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
-        "zoom":2.0,
-        "projectile_velocity": 3150,
-	"zoom_interpolation_frames": 69,
+        "zoom":10.0,
+        "projectile_velocity": 3000,
+	"zoom_interpolation_frames": 42,
         "base_head_offset": 0.35,
 	"min_frames_to_target":4
     },

@@ -21,8 +21,9 @@ def log(message, level):
     # Format the log message
     formatted_message = f"[{module_name}.{func_name}()] {message}"
 
-    # Get the appropriate logging function
-    log_func = getattr(logging, level.lower())
+    # Use named logger so root logger level doesn't gate our messages
+    logger = logging.getLogger('aimbot')
+    log_func = getattr(logger, level.lower())
     log_func(formatted_message)
 
 
