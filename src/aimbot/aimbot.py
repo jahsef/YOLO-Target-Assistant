@@ -25,6 +25,7 @@ from .engine import model
 from .input import mousemover, inputdetector
 from .gui import gui_manager
 from .utils import fpstracker
+from ioutrack import ByteTrack
 
 from argparse import Namespace  
 from screeninfo import get_monitors
@@ -260,6 +261,18 @@ class Aimbot:
             match_thresh=0.6,
             new_track_thresh=0.65
         )
+        
+        # Monkey-patch with Rust based tracker
+        tracker = ByteTrack(max_age=5, min_hits=2, init_tracker_min_score=0.25)
+        def update(self, dets, *args, **kwargs):
+            boxes, cls = dets.data[:,:5], dets.data[:, -1:]
+            tracks = tracker.update(boxes, return_indices=True)
+            idxs = tracks[:, -1:].astype(int)
+            confs = boxes[idxs.flatten(), 4:5]
+            tracks = np.hstack((tracks[:, :-1], confs, cls[idxs.flatten()], idxs))
+            return tracks
+        BYTETracker.update = update
+        
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
 
     def aimbot(self, stracks:list):  

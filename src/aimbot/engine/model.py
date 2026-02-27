@@ -1,10 +1,10 @@
 from pathlib import Path
 from . import tensorrt_engine
-from ultralytics import YOLO
 import cupy as cp
 import torch
 from ultralytics.engine.results import Boxes
 from ultralytics.engine.results import Results
+import numpy as np
 
 class Model:
     def __init__(self,model_path:Path,hw_capture:tuple[int,int]):
@@ -37,19 +37,19 @@ class Model:
         if type(results) is list:
             # print('the correct thing runs now')
             return results[0].boxes
-        
+
         if len(results) == 0:
             return self.empty_boxes
-        
+
         if type(results) is not torch.Tensor:
             results = torch.as_tensor(results)
-        
-        
+
+
         converted_boxes = Boxes(
             boxes=results,
             orig_shape=self.hw_capture
         )
-        return converted_boxes 
+        return converted_boxes
     
     def _load_model(self, model_path: Path, hw_capture:tuple[int,int]):
         self.model_ext = model_path.suffix
@@ -59,11 +59,12 @@ class Model:
             if self.model == None:
                 raise Exception("tensorrt engine did not load correctly")
         elif self.model_ext == '.pt':
+            from ultralytics import YOLO
             self.hw_capture = hw_capture
             self.model = YOLO(model = model_path)
         else:
             raise Exception(f'not supported file format: {self.model_ext} <- file format should be here lol')
-        
+    
     def inference(self,src:cp.ndarray) -> any:
         """
         Args:
@@ -77,7 +78,7 @@ class Model:
 
         if self.model_ext == '.engine':
             #Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
-            results = self._inference_tensorrt(self._preprocess_cp(src))
+            results = self.model.inference_cp(self._preprocess_cp(src))
         elif self.model_ext == '.pt':
             results =  self._inference_torch(self._preprocess_torch(src))
         else:
@@ -85,29 +86,15 @@ class Model:
 
         return self._parse_results_into_ultralytics_boxes(results)
 
-     
-    def _preprocess_frame(self,frame:cp.ndarray) -> cp.ndarray:
-        """_summary_
 
-        Args:
-            frame (cp.ndarray): _description_
+    def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:
+        frame = frame.transpose(2, 0, 1)[cp.newaxis, ...]
+        frame = cp.ascontiguousarray(frame, dtype=cp.float32)
+        cp.true_divide(frame, 255.0, out=frame, dtype=cp.float32)
+        return frame
 
-        Returns:
-            cp.ndarray: normalized bchw format
-        """
-        bchw = frame.transpose(2, 0, 1)[cp.newaxis, ...]
-        float_frame = bchw.astype(cp.float32, copy=False)#engine expects float 32 unless i export it differently
-        float_frame /= 255.0 #/= is inplace, / creates a new cp arr
-        return float_frame
-    
-    def _preprocess_cp(self,frame: cp.ndarray) -> cp.ndarray:
-        return cp.ascontiguousarray(self._preprocess_frame(frame))
-    
-    def _preprocess_torch(self,frame: cp.ndarray) -> torch.Tensor:
-        return torch.as_tensor(self._preprocess_frame(frame)).contiguous() 
-      
-    def _inference_tensorrt(self,src:cp.ndarray) -> cp.ndarray:
-        return self.model.inference_cp(src = src)
+    def _preprocess_torch(self, frame: cp.ndarray) -> torch.Tensor:
+        return torch.as_tensor(self._preprocess_cp(frame))
 
     
     @torch.inference_mode()
@@ -117,5 +104,23 @@ class Model:
             imgsz=self.hw_capture,
             verbose = True
         )
-        
+
         return results
+
+if __name__ == '__main__':
+    #python -m src.aimbot.engine.model
+    import sys
+    import numpy as np
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    ENGINE_PATH = Path("data/models/pf_1550img_11s/weights/640x640_stripped.engine")
+
+    model = Model(model_path=ENGINE_PATH, hw_capture=(640, 640))
+    H, W = model.hw_capture
+
+    frame_cp = cp.asarray(np.random.randint(0, 255, (H, W, 3), dtype=np.uint8))
+
+    result = model.inference(frame_cp)
+    print(f"output shape: {result.data.shape}")
+    print(f"output: {result.data}")

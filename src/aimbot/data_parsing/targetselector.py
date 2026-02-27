@@ -13,19 +13,26 @@ class TargetSelector:
             fps_tracker: object
             ):
         # Tuning constants
+        #for lead (momentum based leading)
         self.MOVEMENT_BUFFER_LENGTH = 48 
         self.JITTER_SCORE_THRESHOLD = 28 #soft gating, handles noise
         self.WMA_VELOCITY_THRESHOLD = 20 #hard gating, if mouse movement is too fast, target is likely close anyway so turn off momentum leading
         self.ZERO_RATIO_THRESHOLD = 0.75 #soft gating, handles noise
         self.HARMONIC_MOTION_DAMPENING_FACTOR = 0.4
         #we also have cos sim soft gating exponential falloff for handling harmonic motion
-
+        self.BASE_LEAD_SENS = 0.5 #0.5 seems to be the optimal momentum for leading shots
+        self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
+        self.LEAD_X_SCALE = 1.0
+        self.LEAD_Y_SCALE = 1.0#may want to lessen y momentum sometimes tbh
+        
         # Physics and targeting constants
         self.FOV_DEGREES = 80
         self.GRAVITY = 128  # Roblox default studs/s^2
         self.TARGET_REAL_HEIGHT = 5
         self.TARGET_REAL_WIDTH = 3.5
         self.DISTANCE_CALIBRATION_FACTOR = 0.425
+        
+        
 
         self.cfg = cfg
         self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
@@ -61,6 +68,7 @@ class TargetSelector:
         # self.jitter_relu_breakpoint = 5#5 or greater counts as 'jitter'
         #1.5 pixels avg jitter /frame pretyty conservative
         self.target_lru = OrderedDict()
+        self.last_target_id = None #for target-aware momentum decay
         
 
     def update_detection_window_center(self, window_dim):
@@ -71,15 +79,31 @@ class TargetSelector:
                             target_width_pixels= None, target_real_width=None):
         """
         Robust distance calculation with perspective-safe head detection and weighted uncertainty.
+        Uses aspect ratio to detect vertical occlusion (legs covered, headglitching) and
+        dynamically favor width measurement when occlusion is likely.
         """
         distances = []
         variances = []
-        
 
-        #eff_vert_fov = self.vfov_rad / self.zoom 
+
+        #eff_vert_fov = self.vfov_rad / self.zoom
 	# supposedly most games use tan fov scaling rather than linear
         eff_vert_fov = 2 * np.atan(np.tan(self.vfov_rad / 2) / self.zoom)
         eff_horiz_fov =  2 * np.atan(np.tan(self.hfov_rad / 2) / self.zoom)
+
+        # Detect occlusion via aspect ratio
+        # Expected ratio is TARGET_REAL_HEIGHT / TARGET_REAL_WIDTH (~1.43 for 5/3.5)
+        # If observed ratio is lower, target is likely vertically occluded
+        height_penalty = 1.0
+        if target_height_pixels and target_width_pixels:
+            expected_ratio = self.TARGET_REAL_HEIGHT / self.TARGET_REAL_WIDTH
+            observed_ratio = target_height_pixels / target_width_pixels
+            # ratio_factor < 1 means target appears "too wide" (vertically occluded)
+            ratio_factor = observed_ratio / expected_ratio
+            # Clamp between 0.3 and 1.0 - below 0.3 is extreme occlusion
+            ratio_factor = max(0.3, min(1.0, ratio_factor))
+            # Square it to make the penalty more aggressive for occluded targets
+            height_penalty = ratio_factor ** 2
 
         # 4. Height-based calculation with uncertainty weighting
         if target_height_pixels:
@@ -90,7 +114,8 @@ class TargetSelector:
             dist = target_real_height / (2 * math.tan(angular_size / 2))
             distances.append(dist)
             # Weight by inverse square of angular size (smaller = less reliable)
-            variances.append(angular_size ** 2)
+            # Apply occlusion penalty to height variance (higher variance = less trusted)
+            variances.append(angular_size ** 2 * height_penalty)
 
         # 5. Width-based calculation (same logic)
         if target_width_pixels:
@@ -273,7 +298,8 @@ class TargetSelector:
             if self.cfg['targeting_settings']['lead_target']:
                 #lead target function handles all the sensitivity lead scaling etc
                 unscaled_deltas = self._get_deltas((aim_x, aim_y), crosshair_xy=crosshair)
-                lead_pixels_x, lead_pixels_y = self.lead_target(predicted_bullet_travel_time=predicted_bullet_travel_time, unscaled_deltas = unscaled_deltas)
+                target_id = highest_prio_enemy_detection[4]
+                lead_pixels_x, lead_pixels_y = self.lead_target(predicted_bullet_travel_time=predicted_bullet_travel_time, unscaled_deltas=unscaled_deltas, target_id=target_id)
                 
         aim_x += lead_pixels_x#sort of acts like a momentum factor while also leading shots
         aim_y += lead_pixels_y
@@ -288,17 +314,26 @@ class TargetSelector:
         log(f'deltas: {deltas}', "DEBUG")
 
         return deltas
-    def lead_target(self, predicted_bullet_travel_time:int, unscaled_deltas:tuple[float,float]):
+    def lead_target(self, predicted_bullet_travel_time:int, unscaled_deltas:tuple[float,float], target_id:int):
         """
         Calculates lead offset based on tracked mouse velocity
-        
+
         raw_aim_xy is tuple of raw deltas
-        
+
         if tracking is too unstable, return (0,0) which is lead_x, lead_y
         """
+        # Target switch detection - decay old momentum when switching targets
+        # 
+        if target_id != self.last_target_id:
+            decay = self.TARGET_SWITCH_DECAY
+            for i in range(len(self.buffer)):
+                self.buffer[i] = (self.buffer[i][0] * decay, self.buffer[i][1] * decay)
+            log(f'target switch detected: {self.last_target_id} -> {target_id}, decayed buffer', "DEBUG")
+            self.last_target_id = target_id
+
         arr_buffer = np.asarray(self.buffer)
         zero_ratio = np.sum(np.all(arr_buffer == 0, axis=1)) / len(arr_buffer)
-        lead_sensitivity = 0.5
+        lead_sensitivity = self.BASE_LEAD_SENS
         # print(arr_buffer.shape)
         log(f'zero_ratio: {zero_ratio}', "DEBUG")
         #square root saling makes it more gentle than linear, but not as aggressive as squared
@@ -347,7 +382,11 @@ class TargetSelector:
         log(f'raw lead_pixels_x: {lead_pixels_x}', "DEBUG")
         log(f'raw lead_pixels_y: {lead_pixels_y}', "DEBUG")
         log(f'predicted_bullet_travel_time: {predicted_bullet_travel_time}', "DEBUG")
-        return (lead_pixels_x* lead_sensitivity, lead_pixels_y * lead_sensitivity)
+        lead_sensitivity_x = lead_sensitivity*self.LEAD_X_SCALE
+        lead_sensitivity_y = lead_sensitivity*self.LEAD_Y_SCALE
+        log(f'lead_sensitivity_x: {lead_sensitivity_x}', "DEBUG")
+        log(f'lead_sensitivity_y: {lead_sensitivity_y}', "DEBUG")
+        return (lead_pixels_x* lead_sensitivity_x, lead_pixels_y * lead_sensitivity_y)
 
 if __name__ == '__main__':#test
     import json

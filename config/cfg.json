@@ -43,12 +43,11 @@
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
-        "zoom":2.5,
-        "projectile_velocity": 3105,
+        "zoom":2.0,
+        "projectile_velocity": 3150,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,
 	"min_frames_to_target":4
-        
     },
     "gui_settings":{
         "opencv_render": false,
