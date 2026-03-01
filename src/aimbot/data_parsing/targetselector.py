@@ -84,7 +84,7 @@ class RSIDampener:
         for ch in self._channels:
             rsi = ch.update(magnitude)
             if rsi is not None:
-                distance = (abs(rsi - 50) / 50) #can use sub 1 power scaling to punish larger oscillation more than small oscillations
+                distance = (abs(rsi - 50) / 50) **(0.5) #can use sub 1 power scaling to punish larger oscillation more than small oscillations
                 factor = 1 - math.exp(-self.k * distance)  # ~1.0 unless RSI is right at 50
                 factors.append(factor)
 
@@ -95,6 +95,7 @@ class RSIDampener:
         rms = (sum(f**2 for f in factors) / len(factors))**0.5
         return max(0.33, rms)
         # return 1.0  
+    
 
 
 class TargetSelector:
@@ -109,17 +110,14 @@ class TargetSelector:
         # Tuning constants
         #for lead (momentum based leading)
         self.MOVEMENT_BUFFER_LENGTH = 64
-        self.JITTER_SCORE_THRESHOLD = 40 #soft gating, handles noise
-        self.WMA_VELOCITY_THRESHOLD = 100 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
-        self.ZERO_DECAY = 0.90 # multiply confidence by this on zero frames (lose 15%)
-        self.ZERO_RECOVERY = 0.30 # recover this fraction of headroom on non-zero frames
-        self._zero_confidence = 1.0 # running confidence [0.33, 1]
-        self.BASE_LEAD_SENS = 0.25 #
+        self.WMA_VELOCITY_THRESHOLD = 64 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
+        self.BASE_LEAD_SENS = 0.25
+        self.LEAD_AGE_WARMUP_FRAMES = 48 # linear warmup: 0 lead at age 0, full lead at this age
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
         self.LEAD_Y_SCALE = 1.0#may want to lessen y momentum sometimes tbh
         self.LEAD_SENS_EMA_ALPHA = 0.12 # EMA smoothing for lead_sensitivity (lower = smoother)
-        self.rsi_dampener = RSIDampener(periods=(32, 128, 512), k=24) #higher k = less dampening, more responsive. lower k = higher dampening, less responsive
+        self.rsi_dampener = RSIDampener(periods=(32, 128, 512), k=16) #higher k = less dampening. lower k = higher dampening, can adversely put sens low at all times rather than damping effectively
         self._lead_sens_ema = self.BASE_LEAD_SENS
         
         # Physics and targeting constants
@@ -393,7 +391,8 @@ class TargetSelector:
                 #lead target function handles all the sensitivity lead scaling etc
                 unscaled_deltas = self._get_deltas((aim_x, aim_y), crosshair_xy=crosshair)
                 target_id = highest_prio_enemy_detection[4]
-                lead_pixels_x, lead_pixels_y = self.lead_target(predicted_bullet_travel_time=predicted_bullet_travel_time, unscaled_deltas=unscaled_deltas, target_id=target_id)
+                track_age = int(highest_prio_enemy_detection[9] - highest_prio_enemy_detection[8]) # last_frame - start_frame
+                lead_pixels_x, lead_pixels_y = self.lead_target(predicted_bullet_travel_time=predicted_bullet_travel_time, unscaled_deltas=unscaled_deltas, target_id=target_id, track_age=track_age)
         
                 aim_x += lead_pixels_x#sort of acts like a momentum factor while also leading shots
                 aim_y += lead_pixels_y
@@ -409,7 +408,7 @@ class TargetSelector:
 
         return deltas
     
-    def lead_target(self, predicted_bullet_travel_time:int, unscaled_deltas:tuple[float,float], target_id:int):
+    def lead_target(self, predicted_bullet_travel_time:int, unscaled_deltas:tuple[float,float], target_id:int, track_age:int = 0):
         """
         Calculates lead offset based on tracked mouse velocity
 
@@ -426,31 +425,22 @@ class TargetSelector:
         arr_buffer = self.buffer.ordered()
         lead_sensitivity = self.BASE_LEAD_SENS
 
-        # EMA-style zero confidence: decay on zero frames, recover on non-zero, floor 0.33
-        if unscaled_deltas == (0, 0):
-            self._zero_confidence = max(self._zero_confidence * self.ZERO_DECAY, 0.33)
-        else:
-            self._zero_confidence += self.ZERO_RECOVERY * (1.0 - self._zero_confidence)
-        zero_confidence = self._zero_confidence
-
-        diffs = arr_buffer[:-1] - arr_buffer[1:]  # (n-1, 2)
-        squared_diffs = diffs ** 2
-        jitter_score = np.sqrt(squared_diffs[:, 0].mean() + squared_diffs[:, 1].mean())
-        jitter_factor = max(0.33, (max((self.JITTER_SCORE_THRESHOLD - jitter_score),0)/self.JITTER_SCORE_THRESHOLD)**(1/2))
-
         wma_velocity_x = (arr_buffer[:, 0] * self.weights).sum()
         wma_velocity_y = (arr_buffer[:, 1] * self.weights).sum()
         wma_velocity = (wma_velocity_x**2 + wma_velocity_y**2)**(0.5)
         # soft gate: linear ramp from 1.0 at half threshold to 0.0 at full threshold, floor 0.33
-        wma_factor = max(0.33, min(1.0, 2.0 * (1.0 - wma_velocity / self.WMA_VELOCITY_THRESHOLD)))
+        wma_factor = max(0.25, min(1.0, 2.0 * (1.0 - wma_velocity / self.WMA_VELOCITY_THRESHOLD)))
 
         lead_pixels_x = wma_velocity_x * self.fps_tracker.get_fps() * predicted_bullet_travel_time #pixels/frame * frames/s * s => pixels
         lead_pixels_y = wma_velocity_y * self.fps_tracker.get_fps() * predicted_bullet_travel_time
 
         rsi_factor = self.rsi_dampener.update(unscaled_deltas[0], unscaled_deltas[1])
 
+        # linear warmup: no lead at age 0, full lead at LEAD_AGE_WARMUP_FRAMES
+        age_factor = min(1.0, track_age / self.LEAD_AGE_WARMUP_FRAMES)
+
         # combine all multipliers
-        raw_lead_sens = lead_sensitivity * zero_confidence * jitter_factor * wma_factor * rsi_factor
+        raw_lead_sens = lead_sensitivity * wma_factor * rsi_factor * age_factor
 
         # EMA smoothing to stabilize lead_sensitivity across frames
         self._lead_sens_ema += self.LEAD_SENS_EMA_ALPHA * (raw_lead_sens - self._lead_sens_ema)
@@ -458,7 +448,7 @@ class TargetSelector:
 
         #BELOW IS USED FOR DEBUG INFO FOR GRAPHING LEAVE COMMENTED
         with open('dampening_factors.csv', 'a') as f:
-            f.write(f'{zero_confidence},{jitter_factor},{wma_factor},{rsi_factor},{raw_lead_sens},{lead_sensitivity},{wma_velocity},{jitter_score},{lead_pixels_x},{lead_pixels_y},{unscaled_deltas[0]},{unscaled_deltas[1]}\n')
+            f.write(f'{wma_factor},{rsi_factor},{age_factor},{raw_lead_sens},{lead_sensitivity},{wma_velocity},{lead_pixels_x},{lead_pixels_y},{unscaled_deltas[0]},{unscaled_deltas[1]}\n')
 
         lead_sensitivity_x = lead_sensitivity*self.LEAD_X_SCALE
         lead_sensitivity_y = lead_sensitivity*self.LEAD_Y_SCALE

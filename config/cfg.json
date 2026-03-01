@@ -18,9 +18,9 @@
         "monitor_idx": 0
     },
     "model": {
-        "ads_dir": "data/models/combined_test2/weights",
+        "ads_dir": "data/models/11s_pseudolabel/weights",
         "ads_filename": "640x640_stripped.engine",
-        "scanning_dir": "data/models/combined_test2/weights",
+        "scanning_dir": "data/models/11s_pseudolabel/weights",
         "scanning_filename": "640x640_stripped.engine",
         "pt_hw_capture": [320, 320]
     },
@@ -31,7 +31,7 @@
         "sens_scaling": 0.33,
         "jitter_strength": 0.00,
         "overshoot_strength": 0.00,
-        "overshoot_chance": 0.00	
+        "overshoot_chance": 0.00
 
     },
 
@@ -43,7 +43,7 @@
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
-        "zoom":10.0,
+        "zoom":1.5,
         "projectile_velocity": 3000,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,

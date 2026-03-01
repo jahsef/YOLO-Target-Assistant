@@ -7,12 +7,10 @@ from ..utils.utils import log
 
 class MouseMover:
     def __init__(self,overall_sens:float,sens_scaling:float,max_deltas:int,jitter_strength:float,overshoot_strength:float,overshoot_chance:float):
-        """_summary_
-
+        """
         Args:
-            sensitivity (_type_): sensitivity 0-2 (more than 2 not recommended)
-            max_deltas (_int_): max pixels to move
-
+            overall_sens: sensitivity 0-2 (more than 2 not recommended)
+            max_deltas: max pixels to move
         """
         self.overall_sens = overall_sens
         self.sens_scaling = sens_scaling
@@ -32,7 +30,7 @@ class MouseMover:
         takes raw deltas, scales and humanizes them and moves mouse, returns scaled deltas too
         """
         scaled_x, scaled_y = self._scale_delta(dx), self._scale_delta(dy)
-        humanized_xy = self._humanize_movement(scaled_x,scaled_y)
+        humanized_xy = self._humanize_movement(scaled_x, scaled_y)
         round_x, round_y = round(humanized_xy[0]), round(humanized_xy[1])
         log(f'moving mouse: {round_x,round_y}', "DEBUG")
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, round_x, round_y)

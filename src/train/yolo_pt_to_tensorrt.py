@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 import os
 
-BASE_DIR = "data/models/pf_1550img_26s_val/weights"
+BASE_DIR = "data/models/11s_pseudolabel/weights"
 MODEL_FILENAME = "best.pt"
 IMGSZ = (640,640)
 FP16 = True
