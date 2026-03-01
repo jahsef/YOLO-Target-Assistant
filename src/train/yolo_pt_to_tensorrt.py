@@ -1,9 +1,9 @@
 from ultralytics import YOLO
 import os
 
-BASE_DIR = "data/models/combined_test2/weights"
+BASE_DIR = "data/models/pf_1550img_26s_val/weights"
 MODEL_FILENAME = "best.pt"
-IMGSZ = (320,320)
+IMGSZ = (640,640)
 FP16 = True
 DEVICE = 0
 WORKSPACE = 8

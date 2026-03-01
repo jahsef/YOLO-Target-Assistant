@@ -1,12 +1,9 @@
-from ultralytics import YOLO
-from ultralytics.trackers.byte_tracker import BYTETracker
-
-import cv2
+from BetterBYTETracker.trackers.byte_tracker import BYTETracker
 import time
 import torch
 import sys
 from pathlib import Path
-import cupy as cp
+from ultralytics.utils.ops import xyxy2xywh
 import numpy as np
 import json
 
@@ -66,6 +63,8 @@ class Aimbot:
         self.setup_bytetracker()
         log("setup_bytetracker complete", "INFO")
 
+        self._frame_count: int = 0
+
     def _validate_targeting_config(self):
         """
         Validates targeting configuration settings.
@@ -107,7 +106,6 @@ class Aimbot:
         else:
             self.scanning_model = model.Model(scanning_path, hw_capture=pt_hw_capture)
         self.scanning_hw_capture = self.scanning_model.hw_capture
-        self._tracked_buffer = np.empty((256, 8), dtype=np.float32)
 
     def init_monitor(self):
         #dynamic monitor settings
@@ -192,18 +190,18 @@ class Aimbot:
                 if frame is None:
                     continue
 
-                results = frame_model.inference(src = frame)
-                self.tracker.update(results.cpu().numpy())
+                results = frame_model.inference(src = frame) #model returns [x1,y1,x2,y2,conf,cls]
+                results[:,0:4] = xyxy2xywh(results[:,0:4])
+                self.tracker.update(results) # expects (N, 6) [x, y, w, h, conf, cls]
+                self.tracker.multi_predict(tracks = None) # ultralytics expects stracks, our custom impl uses internal state (tracks arg unused)
+                tracked_detections = self.tracker.get_active_tracks_with_lifetime() # returns (M, 10) [x1,y1,x2,y2,track_id,score,cls,idx,start_frame,last_frame]
+                self._frame_count += 1
 
-                BYTETracker.multi_predict(self.tracker, self.tracker.tracked_stracks)
-                #pop stuff into preallocated array
-                count = 0
-                for t in self.tracker.tracked_stracks:
-                    if t.is_activated:
-                        self._tracked_buffer[count] = t.result
-                        count += 1
-                tracked_detections = self._tracked_buffer[:count]
-
+                # update tracker max_time_lost with real fps every 60 frames
+                if self._frame_count % 60 == 0 and len(self.fps_tracker.buffer) == self.fps_tracker.fps_buffer_len:
+                    real_fps = self.fps_tracker.get_fps()
+                    self.tracker.max_time_lost = int(real_fps / 30.0 * self.tracker.args.track_buffer)
+                
                 raw_deltas = (0,0)
                 scaled_deltas = (0,0)
                 if self.inputdetector.is_rmb_pressed:
@@ -211,13 +209,16 @@ class Aimbot:
                 else:
                     self.target_selector.reset_zoom()
 
-                if aimbot_active and len(self.tracker.tracked_stracks) > 0:
-                    raw_deltas, scaled_deltas = self.aimbot(self.tracker.tracked_stracks)
+                if aimbot_active and len(tracked_detections) > 0:
+                    raw_deltas, scaled_deltas = self.aimbot(tracked_detections)
+
+                if self.cfg['targeting_settings']['lead_target']:
+                    self.target_selector.update_movement_buffer(raw_deltas)
 
                 self.fps_tracker.update()
                 if self.cfg['logging']['print_fps']:
                     self.fps_tracker.print_fps()
-
+                
                 if self.gui_manager:
                     self.gui_manager.render(frame = frame,
                                             tracked_detections = tracked_detections,
@@ -242,7 +243,7 @@ class Aimbot:
         args = Namespace(
             track_high_thresh=0.65,
             track_low_thresh=0.4,
-            track_buffer=int(target_frame_rate * 0.5),
+            track_buffer=20, #track_buffer -> time = track_buffer/30 so 20/30 = 0.66 seconds until lost
             fuse_score=0.5,
             match_thresh=0.6,
             new_track_thresh=0.65
@@ -250,22 +251,22 @@ class Aimbot:
 
         self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
 
-    def aimbot(self, stracks: list):
+    def aimbot(self, detections: np.ndarray):
         """
         Args:
-            stracks (list): list of STrack objects
+            detections: (n, 10) array [x1, y1, x2, y2, track_id, score, cls, idx, start_frame, last_frame]
+                        Typically from BYTETracker (BetterBYTETracker lib).get_active_tracks_with_lifetime()
         """
-        filtered_stracks = [s for s in stracks if s.frame_id - s.start_frame >= self.cfg['targeting_settings']['min_frames_to_target']]
+        min_age = self.cfg['targeting_settings']['min_frames_to_target']
+        lifetimes = detections[:, 9] - detections[:, 8]  # last_frame - start_frame
+        filtered_detections = detections[lifetimes >= min_age]
+
         raw_deltas = (0,0)
         scaled_deltas = (0,0)
-        if len(filtered_stracks) > 0:
-            filtered_detections = np.asarray([x.result for x in filtered_stracks if x.is_activated])
+        if len(filtered_detections) > 0:
             raw_deltas = self.target_selector.get_deltas(filtered_detections)
-            if raw_deltas != (0,0):#if valid target
+            if raw_deltas != (0,0):
                 scaled_deltas = self.mousemover.move_mouse_humanized(raw_deltas[0],raw_deltas[1])
-        if self.cfg['targeting_settings']['lead_target']:
-            #movement buffer for momentum effects + leading shots correctly
-            self.target_selector.update_movement_buffer(raw_deltas) #update with raw deltas instead of scaled to decouple momentum from sens scaling
         return raw_deltas, scaled_deltas
 
 

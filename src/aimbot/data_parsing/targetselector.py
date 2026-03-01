@@ -31,6 +31,72 @@ class RingBuffer2D:
         self.buf *= factor
 
 
+class _RSIChannel:
+    """Single-period RSI with Wilder EMA smoothing."""
+
+    def __init__(self, period: int):
+        self.period = period
+        self._prev_magnitude = None
+        self._avg_gain = 0.0
+        self._avg_loss = 0.0
+
+    def update(self, magnitude: float) -> float | None:
+        """Feed magnitude, return RSI value (0-100) or None if first frame."""
+        if self._prev_magnitude is None:
+            self._prev_magnitude = magnitude
+            return None
+
+        change = magnitude - self._prev_magnitude
+        self._prev_magnitude = magnitude
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
+
+        self._avg_gain = (self._avg_gain * (self.period - 1) + gain) / self.period
+        self._avg_loss = (self._avg_loss * (self.period - 1) + loss) / self.period
+
+        if self._avg_loss == 0:
+            return None
+
+        rs = self._avg_gain / self._avg_loss
+        return 100 - 100 / (1 + rs)
+
+
+class RSIDampener:
+    """Multi-period RSI dampener. Combines short/medium/long RSI via RMS.
+    RSI near 50 = oscillating = dampen. RSI near extremes = trending = don't dampen.
+    Output factor in [0.33, 1.0]."""
+
+    def __init__(self, periods: tuple[int, ...] = (7, 14, 28), k: float = 24):
+        self._channels = [_RSIChannel(p) for p in periods]
+        self.k = k
+
+    def update(self, dx: float, dy: float) -> float:
+        """Feed new delta, return combined RSI factor.
+
+        Args:
+            dx, dy: raw movement deltas this frame
+        Returns:
+            factor in [0.33, 1.0]
+        """
+        magnitude = (dx**2 + dy**2)**0.5
+
+        factors = []
+        for ch in self._channels:
+            rsi = ch.update(magnitude)
+            if rsi is not None:
+                distance = (abs(rsi - 50) / 50) #can use sub 1 power scaling to punish larger oscillation more than small oscillations
+                factor = 1 - math.exp(-self.k * distance)  # ~1.0 unless RSI is right at 50
+                factors.append(factor)
+
+        if not factors:
+            return 1.0
+
+        # RMS combination, capped at 1.0
+        rms = (sum(f**2 for f in factors) / len(factors))**0.5
+        return max(0.33, rms)
+        # return 1.0  
+
+
 class TargetSelector:
     
     def __init__(
@@ -42,18 +108,18 @@ class TargetSelector:
             ):
         # Tuning constants
         #for lead (momentum based leading)
-        self.MOVEMENT_BUFFER_LENGTH = 64 
-        self.JITTER_SCORE_THRESHOLD = 32 #soft gating, handles noise
-        self.WMA_VELOCITY_THRESHOLD = 50 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
-        self.ZERO_RATIO_THRESHOLD = 0.75 #soft gating, handles noise
-        self.HARMONIC_MOTION_DAMPENING_FACTOR = 0.40 #higher dampens harder
-        #we also have cos sim soft gating exponential falloff for handling harmonic motion
-        self.BASE_LEAD_SENS = 0.25 # 
+        self.MOVEMENT_BUFFER_LENGTH = 64
+        self.JITTER_SCORE_THRESHOLD = 40 #soft gating, handles noise
+        self.WMA_VELOCITY_THRESHOLD = 100 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
+        self.ZERO_DECAY = 0.90 # multiply confidence by this on zero frames (lose 15%)
+        self.ZERO_RECOVERY = 0.30 # recover this fraction of headroom on non-zero frames
+        self._zero_confidence = 1.0 # running confidence [0.33, 1]
+        self.BASE_LEAD_SENS = 0.25 #
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
         self.LEAD_Y_SCALE = 1.0#may want to lessen y momentum sometimes tbh
-        self.COS_SIM_WINDOW = 8 # number of recent frames for harmonic dampening cos_sim
-        self.LEAD_SENS_EMA_ALPHA = 0.15 # EMA smoothing for lead_sensitivity (lower = smoother)
+        self.LEAD_SENS_EMA_ALPHA = 0.12 # EMA smoothing for lead_sensitivity (lower = smoother)
+        self.rsi_dampener = RSIDampener(periods=(32, 128, 512), k=24) #higher k = less dampening, more responsive. lower k = higher dampening, less responsive
         self._lead_sens_ema = self.BASE_LEAD_SENS
         
         # Physics and targeting constants
@@ -358,46 +424,41 @@ class TargetSelector:
             self.last_target_id = target_id
 
         arr_buffer = self.buffer.ordered()
-        zero_ratio = np.sum(np.all(arr_buffer == 0, axis=1)) / self.MOVEMENT_BUFFER_LENGTH
         lead_sensitivity = self.BASE_LEAD_SENS
-        # print(arr_buffer.shape)
-        log(f'zero_ratio: {zero_ratio}', "DEBUG")
-        #square root scaling makes it more gentle than linear, but not as aggressive as squared
-        zero_ratio_factor = max(float((self.ZERO_RATIO_THRESHOLD - zero_ratio)/self.ZERO_RATIO_THRESHOLD), 0) ** (1/2)
+
+        # EMA-style zero confidence: decay on zero frames, recover on non-zero, floor 0.33
+        if unscaled_deltas == (0, 0):
+            self._zero_confidence = max(self._zero_confidence * self.ZERO_DECAY, 0.33)
+        else:
+            self._zero_confidence += self.ZERO_RECOVERY * (1.0 - self._zero_confidence)
+        zero_confidence = self._zero_confidence
 
         diffs = arr_buffer[:-1] - arr_buffer[1:]  # (n-1, 2)
         squared_diffs = diffs ** 2
         jitter_score = np.sqrt(squared_diffs[:, 0].mean() + squared_diffs[:, 1].mean())
-        jitter_factor = max(0, ((self.JITTER_SCORE_THRESHOLD - jitter_score)/self.JITTER_SCORE_THRESHOLD)**(1/2))
+        jitter_factor = max(0.33, (max((self.JITTER_SCORE_THRESHOLD - jitter_score),0)/self.JITTER_SCORE_THRESHOLD)**(1/2))
 
         wma_velocity_x = (arr_buffer[:, 0] * self.weights).sum()
         wma_velocity_y = (arr_buffer[:, 1] * self.weights).sum()
         wma_velocity = (wma_velocity_x**2 + wma_velocity_y**2)**(0.5)
-        # soft gate: linear ramp from 1.0 at half threshold to 0.0 at full threshold
-        wma_factor = max(0.0, min(1.0, 2.0 * (1.0 - wma_velocity / self.WMA_VELOCITY_THRESHOLD)))
+        # soft gate: linear ramp from 1.0 at half threshold to 0.0 at full threshold, floor 0.33
+        wma_factor = max(0.33, min(1.0, 2.0 * (1.0 - wma_velocity / self.WMA_VELOCITY_THRESHOLD)))
 
         lead_pixels_x = wma_velocity_x * self.fps_tracker.get_fps() * predicted_bullet_travel_time #pixels/frame * frames/s * s => pixels
         lead_pixels_y = wma_velocity_y * self.fps_tracker.get_fps() * predicted_bullet_travel_time
-        current_movement_xy = np.asarray(a = (unscaled_deltas[0] + lead_pixels_x,unscaled_deltas[1] + lead_pixels_y))
-        #cos sim harmonic damping
-        recent_frames = arr_buffer[:self.COS_SIM_WINDOW]
-        dots = recent_frames @ current_movement_xy
-        norms = np.linalg.norm(recent_frames, axis=1) * np.linalg.norm(current_movement_xy) + 1e-6
-        cos_sim = (dots / norms).mean()
-        conflict_magnitude = np.linalg.norm(current_movement_xy - recent_frames[0])
-        scale = max(np.linalg.norm(current_movement_xy), np.linalg.norm(recent_frames[0]))
-        dampening_factor = np.exp((cos_sim-1)*conflict_magnitude / (scale + 1e-6) * self.HARMONIC_MOTION_DAMPENING_FACTOR)
+
+        rsi_factor = self.rsi_dampener.update(unscaled_deltas[0], unscaled_deltas[1])
 
         # combine all multipliers
-        raw_lead_sens = lead_sensitivity * zero_ratio_factor * jitter_factor * dampening_factor * wma_factor
-        
+        raw_lead_sens = lead_sensitivity * zero_confidence * jitter_factor * wma_factor * rsi_factor
+
         # EMA smoothing to stabilize lead_sensitivity across frames
         self._lead_sens_ema += self.LEAD_SENS_EMA_ALPHA * (raw_lead_sens - self._lead_sens_ema)
         lead_sensitivity = self._lead_sens_ema
 
         #BELOW IS USED FOR DEBUG INFO FOR GRAPHING LEAVE COMMENTED
         with open('dampening_factors.csv', 'a') as f:
-            f.write(f'{zero_ratio_factor},{jitter_factor},{dampening_factor},{wma_factor},{raw_lead_sens},{lead_sensitivity},{wma_velocity},{cos_sim},{jitter_score},{zero_ratio},{lead_pixels_x},{lead_pixels_y},{unscaled_deltas[0]},{unscaled_deltas[1]}\n')
+            f.write(f'{zero_confidence},{jitter_factor},{wma_factor},{rsi_factor},{raw_lead_sens},{lead_sensitivity},{wma_velocity},{jitter_score},{lead_pixels_x},{lead_pixels_y},{unscaled_deltas[0]},{unscaled_deltas[1]}\n')
 
         lead_sensitivity_x = lead_sensitivity*self.LEAD_X_SCALE
         lead_sensitivity_y = lead_sensitivity*self.LEAD_Y_SCALE

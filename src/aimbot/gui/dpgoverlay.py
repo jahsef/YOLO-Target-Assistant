@@ -89,20 +89,39 @@ class DPGOverlay:
         dpg.draw_line((draw_width - corner_length - offset, draw_height - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
         dpg.draw_line((draw_width - offset, draw_height - corner_length - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
 
-    def _draw_bounding_box(self, x1: int, y1: int, x2: int, y2: int):
-        x1_adj = x1 - self.draw_offset
-        y1_adj = y1 - self.draw_offset
-        x2_adj = x2 - self.draw_offset
-        y2_adj = y2 - self.draw_offset
+    def _draw_bb_corners(self, x1: int, y1: int, x2: int, y2: int):
+        x1 = x1 - self.draw_offset
+        y1 = y1 - self.draw_offset
+        x2 = x2 - self.draw_offset
+        y2 = y2 - self.draw_offset
 
-        tag = dpg.draw_rectangle(
-            (x1_adj, y1_adj),
-            (x2_adj, y2_adj),
-            color=(0, 255, 0, 255),
-            thickness=2,
-            parent=self.drawlist_tag
-        )
-        self.bbox_tags.append(tag)
+        bb_w = x2 - x1
+        bb_h = y2 - y1
+
+        outset_x = max(2, int(bb_w * 0.2))
+        outset_y = max(2, int(bb_h * 0.2))
+        x1 -= outset_x
+        y1 -= outset_y
+        x2 += outset_x
+        y2 += outset_y
+
+        corner_lx = max(2, int(bb_w * 0.15))
+        corner_ly = max(2, int(bb_h * 0.15))
+        thickness = 2
+        color = (0, 205, 0, 255)
+
+        # Top-left
+        self.bbox_tags.append(dpg.draw_line((x1, y1), (x1 + corner_lx, y1), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x1, y1), (x1, y1 + corner_ly), color=color, thickness=thickness, parent=self.drawlist_tag))
+        # Top-right
+        self.bbox_tags.append(dpg.draw_line((x2 - corner_lx, y1), (x2, y1), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x2, y1), (x2, y1 + corner_ly), color=color, thickness=thickness, parent=self.drawlist_tag))
+        # Bottom-left
+        self.bbox_tags.append(dpg.draw_line((x1, y2), (x1 + corner_lx, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x1, y2 - corner_ly), (x1, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
+        # Bottom-right
+        self.bbox_tags.append(dpg.draw_line((x2 - corner_lx, y2), (x2, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x2, y2 - corner_ly), (x2, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
         
     def _clear_canvas(self):
         for tag in self.bbox_tags:
@@ -157,7 +176,7 @@ class DPGOverlay:
 
         #get rendering decisions
         should_draw, should_clear = self._should_render(masked_detections, is_rmb_pressed)
-        
+
         if not should_draw:
             if should_clear  and self.are_bb_drawn:
             #no new detection,  need to clear out old
@@ -173,8 +192,8 @@ class DPGOverlay:
             self.are_bb_drawn = True
             for detection in masked_detections:
                 x1, y1, x2, y2 = map(int, detection[:4])
-                self._draw_bounding_box(x1, y1, x2, y2)
-        
+                self._draw_bb_corners(x1, y1, x2, y2)
+
         # Push updates to screen
         self._render_frame()
         self.last_updated_time = time.time()

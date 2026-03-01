@@ -71,20 +71,20 @@ class Model:
             src (cp.ndarray): source image in CuPy array, should be hwc
         
         Returns:
-            Ultralytics Boxes results which were originally Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
+            CPU numpy array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
             
         """
         
 
         if self.model_ext == '.engine':
             #Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
-            results = self.model.inference_cp(self._preprocess_cp(src))
+            results = cp.asnumpy(self.model.inference_cp(self._preprocess_cp(src)))
         elif self.model_ext == '.pt':
-            results =  self._inference_torch(self._preprocess_torch(src))
+            results =  self._inference_torch(self._preprocess_torch(src)).cpu().numpy()
         else:
             raise Exception('big no no happened this should never execute, model was probably not loaded correctly')
-
-        return self._parse_results_into_ultralytics_boxes(results)
+        return results
+        # return self._parse_results_into_ultralytics_boxes(results)
 
 
     def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:

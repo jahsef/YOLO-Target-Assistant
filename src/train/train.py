@@ -5,17 +5,17 @@ import torch
 import time
 import yaml
 
-DATA_YAML_PATH = 'datasets/pf_1550img/data.yaml'
+DATA_YAML_PATH = 'data/datasets/pf_1550img/data.yaml'
 EPOCHS = 100
-BATCH_SIZE = 8
-NBS = 16
+BATCH_SIZE = 24
+NBS = 24
 IMGSZ = 640
-MODEL_NAME = "yolo11x.pt"
+MODEL_NAME = "yolo26s.pt"
 PROJECT_DIR = 'data/models'
-RUN_NAME = 'pf_1550img_11x'
+RUN_NAME = 'pf_1550img_26s_val_2'
 SAVE_PERIOD = 20
 WARMUP_EPOCHS = 3
-LR0 = 2e-5
+LR0 = 5e-5
 WEIGHT_DECAY = 1e-3
 PATIENCE = 12
 
