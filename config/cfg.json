@@ -16,11 +16,11 @@
     },
     "display_settings": {
         "monitor_idx": 0
-    },
+    },	
     "model": {
-        "ads_dir": "data/models/11s_pseudolabel/weights",
+        "ads_dir": "data/models/combined_test2/weights",
         "ads_filename": "640x640_stripped.engine",
-        "scanning_dir": "data/models/11s_pseudolabel/weights",
+        "scanning_dir": "data/models/combined_test2/weights",
         "scanning_filename": "640x640_stripped.engine",
         "pt_hw_capture": [320, 320]
     },
@@ -44,13 +44,13 @@
 	"lead_target":true,
 	"prioritize_oldest":true,
         "zoom":1.5,
-        "projectile_velocity": 3000,
+        "projectile_velocity": 3100,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,
 	"min_frames_to_target":4
     },
     "gui_settings":{
-        "opencv_render": false,
+        "opencv_render": true,
         "dpg_overlay": false,
         "only_render_overlay_non_ads": true
     }

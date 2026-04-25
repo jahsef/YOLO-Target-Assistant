@@ -1,15 +1,12 @@
 
-minimum frames to target (currently have the config for this, but doesnt do anything in code) (lower prio tbh)
-    n frames before lock, reactivated tracks should not have this requirement
-    or just n frames before right clicking (this solves the zoom issue close range, but see other zoom thing)
 
-base zoom + other zoom modes, we can define multiple zoom modes (very nice for usability)
-    linear warmup over n frames (user defined too) to full zoom, makes it so the aimbot doesnt flick above a target with high zoom mode as soon as you right click
+tracker from scratch (but actually follow through this time) (would need to do on gpu to make it worth) (cupy tracker proved poop, new vectorized tracker only better for like 5+ targets which is rare)
 
-could add ema momentum (bypass the wma target leading entirely since that uses uncertainty scaling) useful for when a stationary target is going like +-3 pixels. actually might not be that useful since i use tracker to smooth out those stuff anyway. idk
-use corner L shapes or crosses for targets rather than full boxes possibly?
+could update RSI harmonic dampening to allow rsi = 20 or 'oversold' to allow MORE movement to move through. however just dampening is probably the safest default
 
-  targetselector.py:334: converts a 48-element deque to numpy every frame. Could replace the deque with a pre-allocated (48, 2) numpy ring buffer and a write index. Probably sub-millisecond but it's a pointless allocation on every    
-  aiming frame.
-
-tracker from scratch (but actually follow through this time) (would need to do on gpu to make it worth)
+SMALL TARGET IMPROVEMENTS
+dynamically crop 160x160 from 640x640 then use upsampler like real-esrgan_4x to 640x640
+train using 160x160 crops, upsample offline, then boom new dataset of upsampled
+train on that hoe, then bam model good on small targets
+if a target < 50 pixels on smallest dimension, we center crop of 160x160 to that target im thinking. we need to scale everything by 1/4 to bring us back to normal space.
+then we also need to apply crop offsets to keep consistency between switching from normal mode to small target mode. 
