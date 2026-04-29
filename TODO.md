@@ -1,4 +1,7 @@
-remove crosshair class entirely, use HSV / classical CV to find crosshairs (improve enemy recall and reduce data need for crosshairs)
+remove crosshair class entirely [DONE]
+- HSV red-mask path shipped (src/aimbot/engine/hsv_crosshair.py + cfg flags model_predict_crosshair / hsv_predict_crosshair). real-usage win: targets no longer occluded by the big crosshair the model needed to see.
+- still want to retire crosshair_cls_id from training data so YOLO capacity goes fully to enemies.
+
 fix base data
 semi supervised using augmentation invariance (STAC, or other semi supervised methods)
 
@@ -6,21 +9,17 @@ tracker from scratch (but actually follow through this time) (would need to do o
 
 could update RSI harmonic dampening to allow rsi = 20 or 'oversold' to allow MORE movement to move through. however just dampening is probably the safest default
 
-SMALL TARGET IMPROVEMENTS [DONE — POC]
-dynamically crop 160x160 from 640x640 then use upsampler like real-esrgan_4x to 640x640
-train using 160x160 crops, upsample offline, then boom new dataset of upsampled
-train on that hoe, then bam model good on small targets
-if a target < 50 pixels on smallest dimension, we center crop of 160x160 to that target im thinking. we need to scale everything by 1/4 to bring us back to normal space.
-then we also need to apply crop offsets to keep consistency between switching from normal mode to small target mode.
-shipped via SRBundleEngine + base/scan_sr/precision_sr routing in aimbot.py. SR gave only ~8% mAP50-95 over bilinear on a small (n=150) val set — not worth the runtime hit (80fps SR vs 140fps base).
+REAL-USAGE FINDINGS (after shipping)
+- scan_sr: net negative. false positives noticeable in scanning running with scan_sr disabled (config: scan_sr_bundle = "") feels better. worst case is FP when on ur gun, pulling down aim to floor
+- precision_sr: clear feel improvement on small/distant targets when ADS-locked. keep this path.
 
-NEXT: REPLACE SR WITH BILINEAR + MULTI-CROP
-- drop the SR engine slot entirely. rebuild bundle as a YOLO-only checkpoint with metadata: input_size, upscale_factor, class_names, bb_largest_side_threshold. caller does the upscale (cupy/torch resize, sub-µs).
-- replace the single locked-target precision crop with N concurrent crops, one per small tracked enemy:
-    - drive crop placement from PREVIOUS frame's tracker state (kalman extrapolates fine), so base + crop-batch inputs are all known up front and can dispatch async.
-    - export the YOLO crop engine with a fixed max batch of 8. zero-pad unused slots, mask outputs by valid_count before applying per-crop offsets.
-    - if >8 small targets exist, top-K by LRU age (or distance to crosshair) — bottom of the list isn't aim-relevant.
-- keep the cross-model NMS pass (base ∪ all crops) — multiple crops can overlap and base detections overlap with crops too. this is union-of-models dedup, not SR-specific.
-- routing semantics stay: scanning → base + (crops for last-frame small targets); ADS+small lock → just precision crop on the lock; ADS+large lock → base only.
+NEXT: REPLACE PRECISION SR WITH BILINEAR + ADD HYSTERESIS
+- drop the SR engine slot from precision path. rebuild bundle as a YOLO-only checkpoint + metadata (input_size, upscale_factor, class_names, bb_largest_side_threshold). caller bilinear-upscales the crop (cupy/torch resize, sub-µs) before YOLO. simpler, cheaper, ~8% mAP50-95 we measured was inside the n=150 noise floor anyway.
+- scan_sr stays gone. base-only scanning is what we're shipping.
+- multi-crop ambition (N concurrent precision crops, one per small tracked enemy) is still appealing but secondary — single-crop on the lock is what feels good today; multi-crop is a "later" win for crowded scenes.
 
-bassically just improve performance and also some bad feel in real usage
+HYSTERESIS (the actual bad-feel sources)
+- bb-size boundary thrashing: target with max(h,w) hovering around bb_largest_side_threshold flips between base-only and precision-crop every frame. add asymmetric thresholds (enter precision at < T_low, leave at > T_high, e.g. T_low=48, T_high=64) so the routing decision is sticky.
+- missed-detection in crop: if precision sr model misses a single frame, then we are fucked. add 1-2 frame hysteresis for crop locations
+
+bilinear simplification + sticky routing + small-window grace = the next coherent unit of work.

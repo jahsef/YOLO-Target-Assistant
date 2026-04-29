@@ -1,1 +1,0 @@
-python "C:\Users\kevin\Documents\GitHub\YOLO11-Enfartment-PoopPS\src\data_getting\hard_mining.py"

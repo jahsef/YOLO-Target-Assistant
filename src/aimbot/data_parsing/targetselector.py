@@ -515,7 +515,7 @@ class TargetSelector:
         lead_sensitivity = self._lead_sens_ema
 
         #BELOW IS USED FOR DEBUG INFO FOR GRAPHING LEAVE COMMENTED
-        # with open('dampening_factors.csv', 'a') as f:
+        # with open('./src/tests/dampening_factors.csv', 'a') as f:
         #     f.write(f'{wma_factor},{rsi_factor},{age_factor},{raw_lead_sens},{lead_sensitivity},{wma_velocity},{lead_pixels_x},{lead_pixels_y},{unscaled_deltas[0]},{unscaled_deltas[1]}\n')
         
         lead_sensitivity_x = lead_sensitivity*self.LEAD_X_SCALE

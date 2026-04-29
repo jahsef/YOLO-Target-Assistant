@@ -33,7 +33,7 @@ def get_color_mask(hsv, hue_ranges, s_min=150, v_min=150, s_max=255, v_max=255):
 
 color_range = 4
 s_min, v_min = 90, 90
-
+ 
 while True:
     frame = camera.grab() # hwc, cp.uint8 BGR on GPU
     if frame is None:
@@ -54,6 +54,15 @@ while True:
     combined_frame_buffer[:, :w, :]       = frame_np
     combined_frame_buffer[:, w:2*w, :]    = frame_np * cv_mask
     combined_frame_buffer[:, 2*w:3*w, :]  = frame_np * cp_mask_np
+
+    # Panel labels — drawn last so the text sits over the imagery.
+    panel_labels = [("OG image", 0), ("opencv path", w), ("cupy fused kernel", 2 * w)]
+    for text, x_off in panel_labels:
+        org = (x_off + 12, 32)
+        cv2.putText(combined_frame_buffer, text, org, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 0, 0), 4, cv2.LINE_AA)  # black outline
+        cv2.putText(combined_frame_buffer, text, org, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (255, 255, 255), 1, cv2.LINE_AA)  # white fill
 
     cv2.imshow("screen", combined_frame_buffer)
     cv2.waitKey(1)
