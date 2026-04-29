@@ -19,3 +19,4 @@ models/
 __pycache__/
 .vscode/
 
+dampening_factors.csv

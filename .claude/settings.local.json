@@ -6,7 +6,8 @@
       "Bash(xargs grep:*)",
       "Bash(git checkout:*)",
       "Bash(python3:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Read(//c/Users/kevin/.claude/**)"
     ],
     "deny": [],
     "ask": []

@@ -6,6 +6,23 @@ from ultralytics.engine.results import Boxes
 from ultralytics.engine.results import Results
 import numpy as np
 
+_PREPROCESS_KERNEL_CP = cp.RawKernel(r"""
+extern "C" __global__
+void hwc_u8_to_nchw_f32_div255(const unsigned char* __restrict__ src,
+                                float* __restrict__ dst,
+                                const int H, const int W) {
+    // dst layout: (1, 3, H, W) contiguous -> dst[c*H*W + y*W + x]
+    // src layout: (H, W, 3)    contiguous -> src[y*W*3 + x*3 + c]
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int c = blockIdx.z;  // 0,1,2
+    if (x >= W || y >= H) return;
+
+    unsigned char v = src[(y * W + x) * 3 + c];
+    dst[c * H * W + y * W + x] = (float)v * (1.0f / 255.0f);
+}
+""", "hwc_u8_to_nchw_f32_div255")
+
 class Model:
     def __init__(self,model_path:Path,hw_capture:tuple[int,int]):
         """_summary_
@@ -87,12 +104,26 @@ class Model:
         # return self._parse_results_into_ultralytics_boxes(results)
 
 
+    # def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:
+    #     frame = frame.transpose(2, 0, 1)[cp.newaxis, ...]
+    #     frame = cp.ascontiguousarray(frame, dtype=cp.float32)
+    #     cp.true_divide(frame, 255.0, out=frame, dtype=cp.float32)
+    #     return frame
+    
+    # above is old non fused operations, about 3x slower (0.05ms lol)
     def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:
-        frame = frame.transpose(2, 0, 1)[cp.newaxis, ...]
-        frame = cp.ascontiguousarray(frame, dtype=cp.float32)
-        cp.true_divide(frame, 255.0, out=frame, dtype=cp.float32)
-        return frame
-
+        """frame: (H, W, 3) cp.uint8. Returns (1, 3, H, W) cp.float32."""
+        assert frame.dtype == cp.uint8 and frame.ndim == 3 and frame.shape[2] == 3
+        H, W, _ = frame.shape
+        src = cp.ascontiguousarray(frame)  # no-op if already contiguous
+        out = cp.empty((1, 3, H, W), dtype=cp.float32)
+        block = (32, 8, 1)
+        grid = ((W + block[0] - 1) // block[0],
+                (H + block[1] - 1) // block[1],
+                3)
+        _PREPROCESS_KERNEL_CP(grid, block, (src, out, np.int32(H), np.int32(W)))
+        return out
+    
     def _preprocess_torch(self, frame: cp.ndarray) -> torch.Tensor:
         return torch.as_tensor(self._preprocess_cp(frame))
 

@@ -99,7 +99,36 @@ class RSIDampener:
 
 
 class TargetSelector:
-    
+    """
+    Per-frame target picking + ballistics for the aimbot.
+
+    Public API (called from aimbot.py main loop):
+      - update_prev_detection(tracked_detections):
+          Refreshes self._prev_detection (the current top-priority enemy) and the LRU
+          (target_lru) every frame. Drives the precision-vs-base SR routing in
+          aimbot._run_detection_pipeline. Must be called every frame, independent of
+          whether aimbot is firing — see the docstring on update_prev_detection for
+          why splitting this out of get_deltas matters.
+      - get_deltas(filtered_detections) -> (dx, dy):
+          The actual aimbot math. Re-picks the highest-priority enemy, applies head
+          offset, predicts bullet drop, optionally adds momentum lead from the movement
+          buffer, and returns mouse deltas to crosshair.
+      - update_movement_buffer(scaled_deltas):
+          Feeds the post-humanizer mouse delta into the RingBuffer used by lead_target
+          for WMA velocity / RSI dampening. Call once per frame after move_mouse_humanized.
+      - update_zoom_interpolation() / reset_zoom():
+          Cubic ease-in zoom state machine. Tick the former while RMB held, call the
+          latter on release. Affects FOV in distance/drop math.
+
+    Internal state worth knowing about:
+      - _prev_detection: latest top-priority enemy row (8-col tracker output) or None.
+      - target_lru: OrderedDict of recently-seen track_ids; used for "stick to oldest
+        target" behavior with 50% hysteresis (see _get_highest_priority_target).
+      - buffer (RingBuffer2D): rolling history of mouse deltas for lead prediction.
+      - zoom: current zoom level, ramps base_zoom -> final_zoom across
+        zoom_interpolation_frames while ADS held.
+    """
+
     def __init__(
             self,
             cfg: dict,
@@ -146,7 +175,6 @@ class TargetSelector:
         self.target_cls_id = cfg['targeting_settings']['target_cls_id']
         self.crosshair_cls_id = cfg['targeting_settings']['crosshair_cls_id']
         self.predict_drop = cfg['targeting_settings']['predict_drop']
-        self.predict_crosshair = cfg['targeting_settings']['predict_crosshair']
         self.projectile_velocity = cfg['targeting_settings']['projectile_velocity']
         self.base_head_offset = cfg['targeting_settings']['base_head_offset']
 
@@ -162,6 +190,9 @@ class TargetSelector:
         #1.5 pixels avg jitter /frame pretyty conservative
         self.target_lru = OrderedDict()
         self.last_target_id = None #for target-aware momentum decay
+        # last selected enemy detection row (8-col tracker output), or None.
+        # exposed for external precision-crop logic in aimbot main loop.
+        self._prev_detection = None
         
 
     def update_detection_window_center(self, window_dim):
@@ -255,7 +286,7 @@ class TargetSelector:
         
         returns detection, l1_dist
         """
-        
+        # verified to be xyxy 
         xyxy_arr = detections[:,:4]
         #needs to be transposed, this tries to unpack row wise, so x1 would try to get the first row xyxy
         x1, y1, x2, y2 = xyxy_arr[:, 0:4].T
@@ -311,16 +342,18 @@ class TargetSelector:
             return (0,0)
         
     def _get_crosshair(self,detections:np.ndarray) -> tuple[int,int]:
-        crosshair = self.detection_window_center
-        if self.predict_crosshair:
+        if self.cfg['targeting_settings']['predict_crosshair']:
             crosshair_mask = detections[:,6]  == self.crosshair_cls_id
             #if crosshair (red dots/scopes) is detected, get closest one
             if np.count_nonzero(crosshair_mask) != 0:
                 crosshair_detections = detections[crosshair_mask]
-                closest_crosshair, _ = self._get_closest_detection(crosshair_detections,crosshair)
-                x1,y1,x2,y2 = closest_crosshair[:4] #xywh returns center_x, center_y, width height
+                closest_crosshair, _ = self._get_closest_detection(crosshair_detections,reference_point=self.detection_window_center)
+                x1,y1,x2,y2 = closest_crosshair[:4] 
+                # log(f'{x1}, {y1}, {x2}, {y2}', level = "INFO") # verify if its wywh or soemthing else
                 crosshair = ((x1+x2)//2, (y1+y2)//2)  
-        return crosshair
+                return crosshair
+            
+        return self.detection_window_center
     
     def update_movement_buffer(self, scaled_deltas:tuple[int,int]):
         #okay so currently this is called in aimbot.aimbot() after it gets scaled deltas from mouse movement humanizer thing
@@ -331,7 +364,7 @@ class TargetSelector:
         """resets zoom for when you aren't right clicking anymore"""
         self.zoom = self.base_zoom
         self.zoom_progress = 0.0
-        log(f'ZOOM RESET', "DEBUG")
+        # log(f'ZOOM RESET', "DEBUG")
 
     def update_zoom_interpolation(self):
         if self.zoom_progress < 1.0:
@@ -346,27 +379,62 @@ class TargetSelector:
             # t = 1 - (1 - self.zoom_progress) ** 3  # cubic ease-out
 
             self.zoom = self.base_zoom + (self.final_zoom - self.base_zoom) * t
-        log(f'zoom: {self.zoom}', "DEBUG")
+        # log(f'zoom: {self.zoom}', "DEBUG")
         
+    def update_prev_detection(self, detections: np.ndarray):
+        """
+        Refresh self._prev_detection from the latest tracker output. Call this every frame
+        from the main loop, regardless of whether aimbot is firing.
+
+        Why this is separate from get_deltas:
+            _prev_detection drives the precision-vs-base routing in aimbot._run_detection_pipeline.
+            If we only mutated it inside get_deltas, it would only update when aimbot is active
+            AND there are enemies. That breaks the routing in a sticky way:
+              - precision triggers (small locked target),
+              - target is lost OR another, larger target becomes top priority on screen,
+              - get_deltas didn't run / wasn't reached for the new target,
+              - _prev_detection is still the old small one,
+              - precision_sr keeps cropping a stale 80x80 region forever, base never gets a turn,
+                so we never re-detect the larger target globally to escape the state.
+            Pulling from the freshest tracker frame here guarantees the next branch decision
+            reflects what's actually on screen right now, not what we last aimed at.
+        """
+        if len(detections) == 0:
+            self._prev_detection = None
+            return
+        cls_mask = detections[:, 6] == self.target_cls_id
+        if np.count_nonzero(cls_mask) == 0:
+            self._prev_detection = None
+            return
+        enemies = detections[cls_mask]
+        crosshair = self._get_crosshair(detections)
+        # always use highest-priority (LRU + hysteresis) regardless of prioritize_oldest cfg —
+        # routing only cares about "is there a small enemy worth precision-cropping", not which
+        # specific one we'd aim at. _get_highest_priority_target falls back to closest internally.
+        self._prev_detection = self._get_highest_priority_target(enemies, crosshair)
+
     def get_deltas(self,detections:np.ndarray):
         """
         processes detection array of shape (n, 8) where columns are:
-        
+
         [x1, y1, x2, y2, track_id, confidence, class_id, Strack idx]
         """
         cls_mask = detections[:,6] == self.target_cls_id
         if np.count_nonzero(cls_mask) != 0:#checking if any targets exist
             enemy_strack_results = detections[cls_mask]
         else:
-            return (0,0) #no enemies 
+            return (0,0) #no enemies
 
-        
-        crosshair = self._get_crosshair(detections)    
+
+        crosshair = self._get_crosshair(detections)
         if self.cfg['targeting_settings']['prioritize_oldest']:
             #if we want to prio oldest detection, else we get closest
             highest_prio_enemy_detection = self._get_highest_priority_target(enemy_strack_results,crosshair)
         else:
             highest_prio_enemy_detection,_ = self._get_closest_detection(enemy_strack_results, crosshair)
+
+        # NOTE: _prev_detection is NOT updated here. See update_prev_detection() — it's refreshed
+        # from the main loop every frame to keep precision/base routing unstuck.
 
         x1,y1,x2,y2 = highest_prio_enemy_detection[:4]
         w = x2 - x1

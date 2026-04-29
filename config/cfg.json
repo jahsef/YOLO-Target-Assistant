@@ -1,7 +1,7 @@
 {
-    "IMPORTANT1": "ads model is only used when right clicking, dpg overlay only shows when not aiming",
+    "IMPORTANT1": "base_model = always-on detector. scan_sr_bundle / precision_sr_bundle may be null/empty to disable.",
     "IMPORTANT2": "pt_hw_capture only for pytorch models",
-    "IMPORTANT3": "if scanning_model is invalid or the same as ads model then only ads model will be used",
+    "IMPORTANT3": "scan_sr runs alongside base when not ADS (or ADS w/ no locked target). precision_sr replaces scan_sr when ADS w/ locked small target. final NMS is run on the union.",
     "logging": {
         "logging_level": "INFO",
         "print_fps": true
@@ -18,17 +18,21 @@
         "monitor_idx": 0
     },	
     "model": {
-        "ads_dir": "data/models/combined_test2/weights",
-        "ads_filename": "640x640_stripped.engine",
-        "scanning_dir": "data/models/combined_test2/weights",
-        "scanning_filename": "640x640_stripped.engine",
-        "pt_hw_capture": [320, 320]
+        "base_dir": "data/models/pf_1550img_11s/weights",
+        "base_filename": "640x640_stripped.engine",
+	"_ex_scan_sr_bundle" : "data/models/bundled_models/b64_yolo11s_640x640_srbundle.pt",
+	"_ex_precision_sr_bundle": "data/models/bundled_models/b1_yolo11s_80x80_srbundle.pt",
+        "scan_sr_bundle": "data/models/bundled_models/b64_yolo11s_640x640_srbundle.pt",
+        "precision_sr_bundle": "data/models/bundled_models/b1_yolo11s_80x80_srbundle.pt",
+        "pt_hw_capture": [320, 320],
+        "conf_threshold": 0.25,
+        "union_nms_iou": 0.25
     },
 	
     "sensitivity_settings": {
-        "max_deltas": 300,
-        "overall_sens": 0.45,
-        "sens_scaling": 0.33,
+        "max_deltas": 256,
+        "overall_sens": 0.40,
+        "sens_scaling": 0.25,
         "jitter_strength": 0.00,
         "overshoot_strength": 0.00,
         "overshoot_chance": 0.00
@@ -43,15 +47,15 @@
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
-        "zoom":1.5,
-        "projectile_velocity": 3100,
+        "zoom":1.6,
+        "projectile_velocity": 2030,
 	"zoom_interpolation_frames": 69,
-        "base_head_offset": 0.35,
+        "base_head_offset": 0.32,
 	"min_frames_to_target":4
     },
     "gui_settings":{
-        "opencv_render": true,
-        "dpg_overlay": false,
+        "opencv_render": false,
+        "dpg_overlay": true,
         "only_render_overlay_non_ads": true
     }
 
