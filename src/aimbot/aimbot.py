@@ -16,6 +16,7 @@ import betterercam
 from .data_parsing import targetselector
 from .engine import model
 from .engine.sr_bundle_engine import SRBundleEngine
+from .engine.hsv_crosshair import hsv_crosshair_detection
 from .input import mousemover, inputdetector
 from .gui import gui_manager
 from .utils import fpstracker
@@ -74,13 +75,22 @@ class Aimbot:
         Validates targeting configuration settings.
         Raises ValueError if configuration is invalid.
         """
-        lead_target = self.cfg['targeting_settings']['lead_target']
-        predict_drop = self.cfg['targeting_settings']['predict_drop']
+        ts = self.cfg['targeting_settings']
+        lead_target = ts['lead_target']
+        predict_drop = ts['predict_drop']
+        model_xh = ts['model_predict_crosshair']
+        hsv_xh = ts['hsv_predict_crosshair']
 
         if lead_target and not predict_drop:
             raise ValueError(
                 "Invalid targeting configuration: 'lead_target' requires 'predict_drop' to be enabled. "
                 "Please enable 'predict_drop' in your config or disable 'lead_target'."
+            )
+
+        if model_xh and hsv_xh:
+            raise ValueError(
+                "Invalid targeting configuration: 'model_predict_crosshair' and 'hsv_predict_crosshair' "
+                "are mutually exclusive. Enable exactly one (or neither) in your config."
             )
 
     def init_model(self):
@@ -98,9 +108,10 @@ class Aimbot:
 
         scan_sr_cfg = self.cfg['model']['scan_sr_bundle']
         precision_sr_cfg = self.cfg['model']['precision_sr_bundle']
+        bb_thresh_override = self.cfg['model']['bb_largest_side_threshold_override']
 
-        self.scan_sr = self._load_sr_bundle(scan_sr_cfg, conf_threshold, "scan_sr")
-        self.precision_sr = self._load_sr_bundle(precision_sr_cfg, conf_threshold, "precision_sr")
+        self.scan_sr = self._load_sr_bundle(scan_sr_cfg, conf_threshold, "scan_sr", bb_thresh_override)
+        self.precision_sr = self._load_sr_bundle(precision_sr_cfg, conf_threshold, "precision_sr", bb_thresh_override)
 
         # iou for the final cross-model NMS pass (base ∪ SR), see _union_nms.
         self.union_nms_iou = float(self.cfg['model']['union_nms_iou'])
@@ -112,7 +123,7 @@ class Aimbot:
                 "WARNING",
             )
 
-    def _load_sr_bundle(self, cfg_path, conf_threshold, label):
+    def _load_sr_bundle(self, cfg_path, conf_threshold, label, bb_largest_side_threshold_override):
         if not cfg_path:
             log(f"{label} bundle disabled (no path configured)", "INFO")
             return None
@@ -121,7 +132,11 @@ class Aimbot:
             log(f"{label} bundle missing at {bundle_path} — disabling", "WARNING")
             return None
         log(f"loading {label} bundle from {bundle_path}", "INFO")
-        return SRBundleEngine(str(bundle_path), conf_threshold=conf_threshold)
+        return SRBundleEngine(
+            str(bundle_path),
+            conf_threshold=conf_threshold,
+            bb_largest_side_threshold_override=bb_largest_side_threshold_override,
+        )
 
     def init_monitor(self):
         #dynamic monitor settings
@@ -251,30 +266,54 @@ class Aimbot:
 
         # SR bundles need cupy/TRT. fall back to wrapper API for .pt base.
         if self.base_model.model_ext != ".engine":
-            return self.base_model.inference(src=frame)
+            model_dets = self.base_model.inference(src=frame)
+        else:
+            preprocessed = self.base_model._preprocess_cp(frame)  # (1, 3, H, W) cp.float32
 
-        preprocessed = self.base_model._preprocess_cp(frame)  # (1, 3, H, W) cp.float32
+            if ads and locked is not None:
+                bb_max_side = max(float(locked[2] - locked[0]), float(locked[3] - locked[1]))
+                if self.precision_sr is not None and bb_max_side < self.precision_sr.bb_largest_side_threshold:
+                    log("precision sr only", level="DEBUG")
+                    model_dets_cp = self._run_precision_crop(preprocessed, locked)
+                else:
+                    log("base only", level="DEBUG")
+                    model_dets_cp = self.base_model.model.inference_cp(preprocessed)
+            else:
+                # scanning path: base + scan_sr concatenated, then cross-model NMS to dedupe overlap.
+                # both arms already NMS internally (baked NMS for base; cross-patch NMS in SRBundleEngine);
+                # this final pass only catches the *between-model* duplicates. wasteful but cheap.
+                log("base + scan_sr", level="DEBUG")
+                base_res = self.base_model.model.inference_cp(preprocessed)
+                if self.scan_sr is not None:
+                    sr_res = self.scan_sr.inference_cp(preprocessed)[0]  # strip batch dim
+                    if sr_res.shape[0]:
+                        base_res = self._union_nms(cp.concatenate([base_res, sr_res], axis=0))
+                model_dets_cp = base_res
 
-        if ads and locked is not None:
-            bb_max_side = max(float(locked[2] - locked[0]), float(locked[3] - locked[1]))
-            if self.precision_sr is not None and bb_max_side < self.precision_sr.bb_largest_side_threshold:
-                log("precision sr only", level="DEBUG")
-                return cp.asnumpy(self._run_precision_crop(preprocessed, locked))
-            log("base only", level="DEBUG")
-            return cp.asnumpy(self.base_model.model.inference_cp(preprocessed))
+            model_dets = cp.asnumpy(model_dets_cp)
 
-        # scanning path: base + scan_sr concatenated, then cross-model NMS to dedupe overlap.
-        # both arms already NMS internally (baked NMS for base; cross-patch NMS in SRBundleEngine);
-        # this final pass only catches the *between-model* duplicates. wasteful but cheap.
-        log("base + scan_sr", level="DEBUG")
-        base_res = self.base_model.model.inference_cp(preprocessed)
-        if self.scan_sr is None:
-            return cp.asnumpy(base_res)
-        sr_res = self.scan_sr.inference_cp(preprocessed)[0]  # strip batch dim
-        if sr_res.shape[0] == 0:
-            return cp.asnumpy(base_res)
-        union = cp.concatenate([base_res, sr_res], axis=0)
-        return cp.asnumpy(self._union_nms(union))
+        return self._apply_crosshair_routing(model_dets, frame)
+
+    def _apply_crosshair_routing(self, model_dets: np.ndarray, frame_rgb_gpu: cp.ndarray) -> np.ndarray:
+        """Filter model crosshair-class dets and/or append HSV-derived crosshair dets per cfg.
+
+        model_dets: (M, 6) np.float32 [x1, y1, x2, y2, conf, cls] in base-region coords.
+        frame_rgb_gpu: raw uint8 (H, W, 3) RGB cupy frame -- HSV path needs the un-preprocessed pixels.
+        """
+        ts = self.cfg['targeting_settings']
+        crosshair_cls_id = ts['crosshair_cls_id']
+
+        if not ts['model_predict_crosshair']:
+            model_dets = model_dets[model_dets[:, 5] != crosshair_cls_id]
+
+        if ts['hsv_predict_crosshair']:
+            crop = ts['hsv_center_crop']
+            crop_hw = tuple(crop) if crop else None
+            hsv_row = hsv_crosshair_detection(frame_rgb_gpu, crosshair_cls_id, center_crop_hw=crop_hw)
+            if hsv_row.shape[0]:
+                model_dets = np.concatenate([model_dets, hsv_row], axis=0)
+
+        return model_dets
 
     def _union_nms(self, dets: cp.ndarray) -> cp.ndarray:
         """Class-aware NMS over a concatenation of detections from multiple models.

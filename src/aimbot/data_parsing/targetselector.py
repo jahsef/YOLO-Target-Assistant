@@ -140,7 +140,7 @@ class TargetSelector:
         #for lead (momentum based leading)
         self.MOVEMENT_BUFFER_LENGTH = 64
         self.WMA_VELOCITY_THRESHOLD = 64 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
-        self.BASE_LEAD_SENS = 0.25
+        self.BASE_LEAD_SENS = 0.35
         self.LEAD_AGE_WARMUP_FRAMES = 48 # linear warmup: 0 lead at age 0, full lead at this age
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
@@ -342,17 +342,17 @@ class TargetSelector:
             return (0,0)
         
     def _get_crosshair(self,detections:np.ndarray) -> tuple[int,int]:
-        if self.cfg['targeting_settings']['predict_crosshair']:
-            crosshair_mask = detections[:,6]  == self.crosshair_cls_id
-            #if crosshair (red dots/scopes) is detected, get closest one
-            if np.count_nonzero(crosshair_mask) != 0:
-                crosshair_detections = detections[crosshair_mask]
-                closest_crosshair, _ = self._get_closest_detection(crosshair_detections,reference_point=self.detection_window_center)
-                x1,y1,x2,y2 = closest_crosshair[:4] 
-                # log(f'{x1}, {y1}, {x2}, {y2}', level = "INFO") # verify if its wywh or soemthing else
-                crosshair = ((x1+x2)//2, (y1+y2)//2)  
-                return crosshair
-            
+        # pipeline (model_predict_crosshair / hsv_predict_crosshair flags) decides
+        # whether cls=crosshair rows ever reach this function. if any are present,
+        # use the closest-to-window-center; otherwise fall back to window center.
+        crosshair_mask = detections[:,6]  == self.crosshair_cls_id
+        if np.count_nonzero(crosshair_mask) != 0:
+            crosshair_detections = detections[crosshair_mask]
+            closest_crosshair, _ = self._get_closest_detection(crosshair_detections,reference_point=self.detection_window_center)
+            x1,y1,x2,y2 = closest_crosshair[:4]
+            crosshair = ((x1+x2)//2, (y1+y2)//2)
+            return crosshair
+
         return self.detection_window_center
     
     def update_movement_buffer(self, scaled_deltas:tuple[int,int]):

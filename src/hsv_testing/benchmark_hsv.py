@@ -19,81 +19,18 @@ hue boundaries are allowed via --tol-pixels).
 """
 
 import argparse
+import sys
 import time
+from pathlib import Path
 
 import cv2
 import cupy as cp
 import numpy as np
 
+# Make the repo root importable when running this file directly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# ---------------------------------------------------------------------------
-# CuPy fused kernel: RGB uint8 -> bool mask, OpenCV HSV semantics, red wrap.
-# ---------------------------------------------------------------------------
-
-_RED_MASK_KERNEL = cp.RawKernel(r"""
-extern "C" __global__
-void rgb_red_mask(const unsigned char* __restrict__ rgb,
-                  unsigned char* __restrict__ mask,
-                  const int n_pixels,
-                  const int color_range_half,
-                  const int s_min,
-                  const int v_min,
-                  const int s_max,
-                  const int v_max) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_pixels) return;
-
-    int base = i * 3;
-    unsigned char r = rgb[base + 0];
-    unsigned char g = rgb[base + 1];
-    unsigned char b = rgb[base + 2];
-
-    unsigned char mx = r > g ? r : g; if (b > mx) mx = b;
-    unsigned char mn = r < g ? r : g; if (b < mn) mn = b;
-
-    int v = mx;
-    if (v < v_min || v > v_max) { mask[i] = 0; return; }
-
-    int diff = mx - mn;
-    int s = (mx == 0) ? 0 : (diff * 255) / mx;
-    if (s < s_min || s > s_max) { mask[i] = 0; return; }
-    if (diff == 0)               { mask[i] = 0; return; }
-
-    // OpenCV hue scale: degrees / 2 -> [0, 180).
-    // 30 == 60/2 (factor that absorbs the /2 into the numerator).
-    int h;
-    if (mx == r)       h = (30 * (g - b)) / diff;
-    else if (mx == g)  h = 60 + (30 * (b - r)) / diff;
-    else               h = 120 + (30 * (r - g)) / diff;
-    if (h < 0) h += 180;
-
-    bool red = (h <= color_range_half) || (h >= 179 - color_range_half);
-    mask[i] = red ? 1 : 0;
-}
-""", "rgb_red_mask")
-
-
-def cupy_red_mask(rgb_gpu: cp.ndarray, color_range: int,
-                  s_min: int, v_min: int,
-                  s_max: int = 255, v_max: int = 255) -> cp.ndarray:
-    """rgb_gpu: (H, W, 3) cp.uint8. Returns (H, W) cp.bool_."""
-    assert rgb_gpu.dtype == cp.uint8 and rgb_gpu.ndim == 3 and rgb_gpu.shape[2] == 3
-    h, w, _ = rgb_gpu.shape
-    n = h * w
-    mask_u8 = cp.empty((h, w), dtype=cp.uint8)
-
-    rgb_contig = cp.ascontiguousarray(rgb_gpu)
-
-    threads = 256
-    blocks = (n + threads - 1) // threads
-    _RED_MASK_KERNEL(
-        (blocks,), (threads,),
-        (rgb_contig, mask_u8, np.int32(n),
-         np.int32(color_range // 2),
-         np.int32(s_min), np.int32(v_min),
-         np.int32(s_max), np.int32(v_max))
-    )
-    return mask_u8.view(cp.bool_)
+from src.aimbot.engine.hsv_crosshair import _RED_MASK_KERNEL, cupy_red_mask  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

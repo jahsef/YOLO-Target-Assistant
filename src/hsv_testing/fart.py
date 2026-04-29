@@ -1,9 +1,14 @@
+import sys
+from pathlib import Path
+
 import betterercam
 import cv2
 import numpy as np
 import cupy as cp
 
-from benchmark_hsv import cupy_red_mask
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.aimbot.engine.hsv_crosshair import cupy_red_mask
 
 screen_size = (2560,1440)
 screen_center = (screen_size[0]//2, screen_size[1]//2)

@@ -18,6 +18,7 @@ import torch
 from torchvision.ops import batched_nms
 
 from .tensorrt_engine import TensorRT_Engine
+from ..utils.utils import log
 
 
 class SRBundleEngine:
@@ -26,11 +27,20 @@ class SRBundleEngine:
         bundle_path: str,
         conf_threshold: float,
         verbose: bool = False,
+        bb_largest_side_threshold_override: int = -1,
     ):
         bundle = torch.load(bundle_path, weights_only=False)
         self.sr = TensorRT_Engine(engine_bytes=bundle["sr_engine"], conf_threshold=0.0, verbose=verbose, nms=False)
         self.yolo = TensorRT_Engine(engine_bytes=bundle["yolo_engine"], conf_threshold=conf_threshold, verbose=verbose, nms=True)
-        self.bb_largest_side_threshold = bundle["bb_largest_side_threshold"]
+        bundle_thresh = bundle["bb_largest_side_threshold"]
+        if bb_largest_side_threshold_override == -1:
+            self.bb_largest_side_threshold = bundle_thresh
+        else:
+            log(
+                f"overriding bb_largest_side_threshold: bundle={bundle_thresh} -> override={bb_largest_side_threshold_override}",
+                "INFO",
+            )
+            self.bb_largest_side_threshold = bb_largest_side_threshold_override
         self.class_names = bundle["class_names"]
         self.sr_model_name = bundle["sr_model_name"]
         self.yolo_model_name = bundle["yolo_model_name"]
