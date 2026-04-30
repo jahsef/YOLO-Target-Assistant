@@ -138,14 +138,14 @@ class TargetSelector:
             ):
         # Tuning constants
         #for lead (momentum based leading)
-        self.MOVEMENT_BUFFER_LENGTH = 64
-        self.WMA_VELOCITY_THRESHOLD = 64 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
-        self.BASE_LEAD_SENS = 0.35
-        self.LEAD_AGE_WARMUP_FRAMES = 48 # linear warmup: 0 lead at age 0, full lead at this age
+        self.MOVEMENT_BUFFER_LENGTH = 90
+        self.WMA_VELOCITY_THRESHOLD = 72 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
+        self.BASE_LEAD_SENS = 0.45
+        self.LEAD_AGE_WARMUP_FRAMES = 24 # linear warmup: 0 lead at age 0, full lead at this age
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
         self.LEAD_Y_SCALE = 1.0#may want to lessen y momentum sometimes tbh
-        self.LEAD_SENS_EMA_ALPHA = 0.12 # EMA smoothing for lead_sensitivity (lower = smoother)
+        self.LEAD_SENS_EMA_ALPHA = 0.10 # EMA smoothing for lead_sensitivity (lower = smoother)
         self.rsi_dampener = RSIDampener(periods=(32, 128, 512), k=16) #higher k = less dampening. lower k = higher dampening, can adversely put sens low at all times rather than damping effectively
         self._lead_sens_ema = self.BASE_LEAD_SENS
         

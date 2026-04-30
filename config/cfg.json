@@ -46,19 +46,23 @@
         "crosshair_cls_id": 2,
         "head_toggle" : true,
         "model_predict_crosshair": false,
-        "hsv_predict_crosshair": true,
-        "hsv_center_crop": [360, 360],
+        "hsv_settings": {
+            "enabled": true,
+            "center_crop": [360, 360],
+            "_doc_voting_scheme": "simple (simple avg, med speed due to variable length), weighted_center (fastest due to dense computation), connected = largest connected component (more precise but can be the worst in terms of FP, slowest, also bad temporal stability if using a non simple dot)",
+            "voting_scheme": "weighted_center"
+        },
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
         "zoom":3,
-        "projectile_velocity": 3135,
+        "projectile_velocity": 2500,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,
 	"min_frames_to_target":4
     },
     "gui_settings":{
-        "opencv_render": true,
+        "opencv_render": false,
         "dpg_overlay": false,
         "only_render_overlay_non_ads": true
     }

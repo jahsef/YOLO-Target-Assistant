@@ -16,7 +16,7 @@ import betterercam
 from .data_parsing import targetselector
 from .engine import model
 from .engine.sr_bundle_engine import SRBundleEngine
-from .engine.hsv_crosshair import hsv_crosshair_detection
+from .engine.hsv_crosshair import HSVCrosshairDetector
 from .input import mousemover, inputdetector
 from .gui import gui_manager
 from .utils import fpstracker
@@ -57,6 +57,8 @@ class Aimbot:
         self.fps_tracker = fpstracker.FPSTracker()
         self.init_camera()
         log("init_camera complete", "INFO")
+        self._init_hsv()
+        log("init_hsv complete", "INFO")
 
         self.target_selector = targetselector.TargetSelector(
             cfg=self.cfg,
@@ -79,7 +81,7 @@ class Aimbot:
         lead_target = ts['lead_target']
         predict_drop = ts['predict_drop']
         model_xh = ts['model_predict_crosshair']
-        hsv_xh = ts['hsv_predict_crosshair']
+        hsv_xh = ts['hsv_settings']['enabled']
 
         if lead_target and not predict_drop:
             raise ValueError(
@@ -89,9 +91,16 @@ class Aimbot:
 
         if model_xh and hsv_xh:
             raise ValueError(
-                "Invalid targeting configuration: 'model_predict_crosshair' and 'hsv_predict_crosshair' "
+                "Invalid targeting configuration: 'model_predict_crosshair' and 'hsv_settings.enabled' "
                 "are mutually exclusive. Enable exactly one (or neither) in your config."
             )
+
+        if hsv_xh:
+            scheme = ts['hsv_settings']['voting_scheme']
+            if scheme not in HSVCrosshairDetector.VOTING_SCHEMES:
+                raise ValueError(
+                    f"Invalid 'hsv_settings.voting_scheme': {scheme!r}. Must be one of {list(HSVCrosshairDetector.VOTING_SCHEMES)}."
+                )
 
     def init_model(self):
         # base_model: always-on detector (TRT .engine or .pt).
@@ -163,6 +172,22 @@ class Aimbot:
         )
         self.inputdetector = inputdetector.InputDetector(input_cfg['toggle_hotkey'])
         self.inputdetector.start_input_detection()
+
+    def _init_hsv(self):
+        # Build the HSVCrosshairDetector if HSV crosshair detection is enabled.
+        # The detector owns its own scratch buffers based on the chosen scheme.
+        ts = self.cfg['targeting_settings']
+        hsv_cfg = ts['hsv_settings']
+        if not hsv_cfg['enabled']:
+            self.hsv_detector = None
+            return
+        crop = hsv_cfg['center_crop']
+        self.hsv_detector = HSVCrosshairDetector(
+            voting_scheme=hsv_cfg['voting_scheme'],
+            crosshair_cls_id=ts['crosshair_cls_id'],
+            frame_hw=self.base_hw_capture,
+            center_crop_hw=tuple(crop) if crop else None,
+        )
 
     def init_camera(self):
         # single fixed region centered on screen at base_hw_capture size.
@@ -306,10 +331,8 @@ class Aimbot:
         if not ts['model_predict_crosshair']:
             model_dets = model_dets[model_dets[:, 5] != crosshair_cls_id]
 
-        if ts['hsv_predict_crosshair']:
-            crop = ts['hsv_center_crop']
-            crop_hw = tuple(crop) if crop else None
-            hsv_row = hsv_crosshair_detection(frame_rgb_gpu, crosshair_cls_id, center_crop_hw=crop_hw)
+        if self.hsv_detector is not None:
+            hsv_row = self.hsv_detector.detect(frame_rgb_gpu)
             if hsv_row.shape[0]:
                 model_dets = np.concatenate([model_dets, hsv_row], axis=0)
 

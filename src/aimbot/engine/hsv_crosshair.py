@@ -71,95 +71,156 @@ def cupy_red_mask(rgb_gpu: cp.ndarray, color_range: int,
 # Hardcoded HSV thresholds tuned empirically for this game's red crosshair
 # via src/hsv_testing/fart.py visual sweep.
 _HSV_COLOR_RANGE = 9
-_HSV_S_MIN = 160
+_HSV_S_MIN = 120
 _HSV_S_MAX = 245
-_HSV_V_MIN = 160
+_HSV_V_MIN = 120
 _HSV_V_MAX = 245
 _HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
-# 64x64 gives better iou for jittering crosshair detections so better tracker detections
+# 64x64 gives better iou for jittering crosshair detections so better tracker stickiness.
 
-# Centroid voting: weight contributions by a 2D Gaussian centered on the ROI so
-# pixels near the center pull the centroid more than pixels at the edges. Sigma
-# chosen so the corner weight ≈ 0.25 of the center weight (exp(-d²/(2σ²)) = 0.25
-# at d = roi_half → σ = roi_half / sqrt(2*ln(4)) ≈ roi_half / 1.665).
+# Sigma chosen so corner weight ≈ 0.25 * center weight:
+# exp(-d²/(2σ²)) = 0.25 at d = roi_half → σ = roi_half / sqrt(2*ln(4)) ≈ roi_half / 1.665
 _GAUSS_EDGE_FACTOR = 1.665  # sqrt(2 * ln(4))
 
-# Cache of (ys, xs, weights, wm_buf) per ROI shape. Built lazily on first call;
-# reused every frame after that. ys is (h,1), xs is (1,w), weights and wm_buf
-# are (h,w). wm_buf is the scratch buffer for `weights * mask` so the hot path
-# doesn't allocate.
-_CENTROID_CACHE: dict[tuple[int, int], tuple[cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]] = {}
 
-
-def _get_centroid_buffers(h: int, w: int):
-    key = (h, w)
-    cached = _CENTROID_CACHE.get(key)
-    if cached is not None:
-        return cached
-    ys = cp.arange(h, dtype=cp.float32).reshape(h, 1)
-    xs = cp.arange(w, dtype=cp.float32).reshape(1, w)
-    cy = (h - 1) * 0.5
-    cx = (w - 1) * 0.5
-    sigma_y = (h * 0.5) / _GAUSS_EDGE_FACTOR
-    sigma_x = (w * 0.5) / _GAUSS_EDGE_FACTOR
-    weights = cp.exp(
-        -(((ys - cy) ** 2) / (2.0 * sigma_y * sigma_y)
-          + ((xs - cx) ** 2) / (2.0 * sigma_x * sigma_x))
-    ).astype(cp.float32)
-    wm_buf = cp.empty((h, w), dtype=cp.float32)
-    _CENTROID_CACHE[key] = (ys, xs, weights, wm_buf)
-    return _CENTROID_CACHE[key]
-
-
-def hsv_crosshair_detection(
-    rgb_frame_gpu: cp.ndarray,
-    crosshair_cls_id: int,
-    center_crop_hw: tuple[int, int] | None = None,
-) -> np.ndarray:
+class HSVCrosshairDetector:
     """
-    Red-crosshair detector backed by the fused HSV kernel. Returns a (1, 6)
-    np.float32 row [x1, y1, x2, y2, conf, cls] in base-region xyxy coords,
-    ready to concat with model detections before xyxy->xywh + tracker.update.
-    Returns (0, 6) empty array if no red pixels match.
+    Red-crosshair detector backed by the fused HSV kernel + a configurable
+    voting scheme. Owns any pre-allocated buffers the chosen scheme needs so
+    the hot path never allocates.
 
-    RED CROSSHAIRS ONLY. Other colors / shapes are not supported yet -- this
-    is intentionally narrow because the only thing we need from this path
-    right now is locating the game's red reticle. Generalize the kernel
-    rather than special-casing here if you want green/blue/cyan later.
+    RED CROSSHAIRS ONLY. Other colors / shapes are not supported yet --
+    intentionally narrow because the only thing we need from this path right
+    now is locating the game's red reticle. Generalize the kernel rather than
+    special-casing here if you want green/blue/cyan later.
 
-    rgb_frame_gpu: (H, W, 3) cp.uint8 RGB (raw frame from betterercam).
-    center_crop_hw: optional (crop_h, crop_w) -- only look in the center crop.
-        Useful when the crosshair is roughly screen-centered and you want
-        to skip 90%+ of the pixels.
+    Voting schemes:
+      "simple":          plain mean of mask-true coords. cheapest, can drift if
+                         a few stray red pixels exist outside the actual crosshair.
+      "weighted_center": Gaussian-center-weighted mean. center pixels pull harder
+                         than edge pixels (corner weight ≈ 0.25 * center). cheap,
+                         robust to peripheral red, slight bias toward ROI center.
+      "connected":       largest connected red component centroid. most robust
+                         (e.g. survives red enemy uniforms leaking into ROI), but
+                         pays for cupyx.scipy.ndimage.label which is the slowest path.
     """
-    H, W, _ = rgb_frame_gpu.shape
 
-    if center_crop_hw is not None:
-        crop_h, crop_w = center_crop_hw
-        y0 = (H - crop_h) // 2
-        x0 = (W - crop_w) // 2
-        roi = rgb_frame_gpu[y0:y0 + crop_h, x0:x0 + crop_w]
-    else:
-        y0, x0 = 0, 0
-        roi = rgb_frame_gpu
+    VOTING_SCHEMES = ("simple", "weighted_center", "connected")
 
-    mask = cupy_red_mask(roi, _HSV_COLOR_RANGE, s_min = _HSV_S_MIN, s_max = _HSV_S_MAX, v_min = _HSV_V_MIN, v_max = _HSV_V_MAX)
+    def __init__(
+        self,
+        voting_scheme: str,
+        crosshair_cls_id: int,
+        frame_hw: tuple[int, int],
+        center_crop_hw: tuple[int, int] | None = None,
+    ):
+        if voting_scheme not in self.VOTING_SCHEMES:
+            raise ValueError(
+                f"Invalid voting_scheme: {voting_scheme!r}. Must be one of {list(self.VOTING_SCHEMES)}."
+            )
+        self.voting_scheme = voting_scheme
+        self.crosshair_cls_id = int(crosshair_cls_id)
+        self.frame_h, self.frame_w = int(frame_hw[0]), int(frame_hw[1])
+        self.center_crop_hw = (int(center_crop_hw[0]), int(center_crop_hw[1])) if center_crop_hw else None
 
-    # Gaussian-weighted centroid: pre-cached weights * mask gives per-pixel
-    # vote strength; then weighted mean over the (cached) y/x index grids.
-    # wm is a pre-allocated scratch buffer reused frame-to-frame (no per-frame alloc).
-    ys, xs, weights, wm = _get_centroid_buffers(int(roi.shape[0]), int(roi.shape[1]))
-    cp.multiply(weights, mask, out=wm)  # mask broadcasts bool->0/1
-    total = float(wm.sum())
-    if total <= 0.0:
-        return np.empty((0, 6), dtype=np.float32)
+        # ROI shape (post crop) determines any per-shape buffer sizes.
+        self.roi_h, self.roi_w = self.center_crop_hw if self.center_crop_hw else (self.frame_h, self.frame_w)
 
-    cy_local = float((wm * ys).sum()) / total
-    cx_local = float((wm * xs).sum()) / total
-    cy = cy_local + y0
-    cx = cx_local + x0
-    half = _HSV_BOX_SIZE / 2
-    return np.array([[
-        cx - half, cy - half, cx + half, cy + half,
-        1.0, float(crosshair_cls_id)
-    ]], dtype=np.float32)
+        # Cache of crop origin so detect() doesn't recompute it every frame.
+        if self.center_crop_hw:
+            self._y0 = (self.frame_h - self.roi_h) // 2
+            self._x0 = (self.frame_w - self.roi_w) // 2
+        else:
+            self._y0 = 0
+            self._x0 = 0
+
+        # Bind the chosen vote method directly so detect() doesn't dispatch on a string each frame.
+        vote_fn_map = {
+            "simple": self._vote_simple,
+            "weighted_center": self._vote_weighted_center,
+            "connected": self._vote_connected,
+        }
+        self._vote = vote_fn_map[voting_scheme]
+
+        # Scheme-specific buffer init.
+        if voting_scheme == "weighted_center":
+            self._init_weighted_center_buffers()
+
+    # --- buffer init ----------------------------------------------------------
+
+    def _init_weighted_center_buffers(self):
+        h, w = self.roi_h, self.roi_w
+        ys = cp.arange(h, dtype=cp.float32).reshape(h, 1)
+        xs = cp.arange(w, dtype=cp.float32).reshape(1, w)
+        cy = (h - 1) * 0.5
+        cx = (w - 1) * 0.5
+        sigma_y = (h * 0.5) / _GAUSS_EDGE_FACTOR
+        sigma_x = (w * 0.5) / _GAUSS_EDGE_FACTOR
+        weights = cp.exp(
+            -(((ys - cy) ** 2) / (2.0 * sigma_y * sigma_y)
+              + ((xs - cx) ** 2) / (2.0 * sigma_x * sigma_x))
+        ).astype(cp.float32)
+        self._w_ys = ys
+        self._w_xs = xs
+        self._w_weights = weights
+        self._w_wm = cp.empty((h, w), dtype=cp.float32)  # scratch for weights*mask
+
+    # --- voting ---------------------------------------------------------------
+
+    def _vote_simple(self, mask: cp.ndarray):
+        ys, xs = cp.where(mask)
+        if ys.size == 0:
+            return None
+        return float(ys.mean()), float(xs.mean())
+
+    def _vote_weighted_center(self, mask: cp.ndarray):
+        cp.multiply(self._w_weights, mask, out=self._w_wm)  # mask broadcasts bool->0/1
+        total = float(self._w_wm.sum())
+        if total <= 0.0:
+            return None
+        cy = float((self._w_wm * self._w_ys).sum()) / total
+        cx = float((self._w_wm * self._w_xs).sum()) / total
+        return cy, cx
+
+    def _vote_connected(self, mask: cp.ndarray):
+        from cupyx.scipy.ndimage import label  # lazy import; only loaded if scheme used
+        labels, n = label(mask)
+        if n == 0:
+            return None
+        counts = cp.bincount(labels.ravel())
+        counts[0] = 0  # background
+        largest = int(cp.argmax(counts))
+        ys, xs = cp.where(labels == largest)
+        if ys.size == 0:
+            return None
+        return float(ys.mean()), float(xs.mean())
+
+    # --- public entry point ---------------------------------------------------
+
+    def detect(self, rgb_frame_gpu: cp.ndarray) -> np.ndarray:
+        """
+        rgb_frame_gpu: (H, W, 3) cp.uint8 RGB (raw frame from betterercam),
+            shape must match `frame_hw` from __init__.
+
+        Returns (1, 6) np.float32 [x1, y1, x2, y2, conf, cls] in base-region xyxy
+        coords if a centroid is found, else (0, 6) empty array.
+        """
+        if self.center_crop_hw:
+            roi = rgb_frame_gpu[self._y0:self._y0 + self.roi_h, self._x0:self._x0 + self.roi_w]
+        else:
+            roi = rgb_frame_gpu
+
+        mask = cupy_red_mask(roi, _HSV_COLOR_RANGE, s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
+                             v_min=_HSV_V_MIN, v_max=_HSV_V_MAX)
+        vote = self._vote(mask)
+        if vote is None:
+            return np.empty((0, 6), dtype=np.float32)
+
+        cy_local, cx_local = vote
+        cy = cy_local + self._y0
+        cx = cx_local + self._x0
+        half = _HSV_BOX_SIZE / 2
+        return np.array([[
+            cx - half, cy - half, cx + half, cy + half,
+            1.0, float(self.crosshair_cls_id)
+        ]], dtype=np.float32)
