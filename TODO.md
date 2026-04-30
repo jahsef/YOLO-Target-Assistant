@@ -2,6 +2,11 @@ remove crosshair class entirely [DONE]
 - HSV red-mask path shipped (src/aimbot/engine/hsv_crosshair.py + cfg flags model_predict_crosshair / hsv_predict_crosshair). real-usage win: targets no longer occluded by the big crosshair the model needed to see.
 - still want to retire crosshair_cls_id from training data so YOLO capacity goes fully to enemies.
 
+labeled dataset for hsv detection params color range and center, min,max of v/s then using grid search / bayesian.
+100 images of hsv filtering with the cupy kernel should be insanely fast (19k fps supposedly in batch 1)
+so batched filtering we should be able to grid search like 1000 combinations in a second
+or use bayesian optimizaiton because its cool
+
 fix base data
 semi supervised using augmentation invariance (STAC, or other semi supervised methods)
 
