@@ -70,10 +70,45 @@ def cupy_red_mask(rgb_gpu: cp.ndarray, color_range: int,
 
 # Hardcoded HSV thresholds tuned empirically for this game's red crosshair
 # via src/hsv_testing/fart.py visual sweep.
-_HSV_COLOR_RANGE = 4
-_HSV_S_MIN = 90
-_HSV_V_MIN = 90
-_HSV_BOX_SIZE = 32  # synthetic detection box side, in base-region pixels
+_HSV_COLOR_RANGE = 9
+_HSV_S_MIN = 160
+_HSV_S_MAX = 245
+_HSV_V_MIN = 160
+_HSV_V_MAX = 245
+_HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
+# 64x64 gives better iou for jittering crosshair detections so better tracker detections
+
+# Centroid voting: weight contributions by a 2D Gaussian centered on the ROI so
+# pixels near the center pull the centroid more than pixels at the edges. Sigma
+# chosen so the corner weight ≈ 0.25 of the center weight (exp(-d²/(2σ²)) = 0.25
+# at d = roi_half → σ = roi_half / sqrt(2*ln(4)) ≈ roi_half / 1.665).
+_GAUSS_EDGE_FACTOR = 1.665  # sqrt(2 * ln(4))
+
+# Cache of (ys, xs, weights, wm_buf) per ROI shape. Built lazily on first call;
+# reused every frame after that. ys is (h,1), xs is (1,w), weights and wm_buf
+# are (h,w). wm_buf is the scratch buffer for `weights * mask` so the hot path
+# doesn't allocate.
+_CENTROID_CACHE: dict[tuple[int, int], tuple[cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]] = {}
+
+
+def _get_centroid_buffers(h: int, w: int):
+    key = (h, w)
+    cached = _CENTROID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    ys = cp.arange(h, dtype=cp.float32).reshape(h, 1)
+    xs = cp.arange(w, dtype=cp.float32).reshape(1, w)
+    cy = (h - 1) * 0.5
+    cx = (w - 1) * 0.5
+    sigma_y = (h * 0.5) / _GAUSS_EDGE_FACTOR
+    sigma_x = (w * 0.5) / _GAUSS_EDGE_FACTOR
+    weights = cp.exp(
+        -(((ys - cy) ** 2) / (2.0 * sigma_y * sigma_y)
+          + ((xs - cx) ** 2) / (2.0 * sigma_x * sigma_x))
+    ).astype(cp.float32)
+    wm_buf = cp.empty((h, w), dtype=cp.float32)
+    _CENTROID_CACHE[key] = (ys, xs, weights, wm_buf)
+    return _CENTROID_CACHE[key]
 
 
 def hsv_crosshair_detection(
@@ -108,13 +143,21 @@ def hsv_crosshair_detection(
         y0, x0 = 0, 0
         roi = rgb_frame_gpu
 
-    mask = cupy_red_mask(roi, _HSV_COLOR_RANGE, _HSV_S_MIN, _HSV_V_MIN)
-    ys, xs = cp.where(mask)
-    if ys.size == 0:
+    mask = cupy_red_mask(roi, _HSV_COLOR_RANGE, s_min = _HSV_S_MIN, s_max = _HSV_S_MAX, v_min = _HSV_V_MIN, v_max = _HSV_V_MAX)
+
+    # Gaussian-weighted centroid: pre-cached weights * mask gives per-pixel
+    # vote strength; then weighted mean over the (cached) y/x index grids.
+    # wm is a pre-allocated scratch buffer reused frame-to-frame (no per-frame alloc).
+    ys, xs, weights, wm = _get_centroid_buffers(int(roi.shape[0]), int(roi.shape[1]))
+    cp.multiply(weights, mask, out=wm)  # mask broadcasts bool->0/1
+    total = float(wm.sum())
+    if total <= 0.0:
         return np.empty((0, 6), dtype=np.float32)
 
-    cy = float(ys.mean()) + y0
-    cx = float(xs.mean()) + x0
+    cy_local = float((wm * ys).sum()) / total
+    cx_local = float((wm * xs).sum()) / total
+    cy = cy_local + y0
+    cx = cx_local + x0
     half = _HSV_BOX_SIZE / 2
     return np.array([[
         cx - half, cy - half, cx + half, cy + half,

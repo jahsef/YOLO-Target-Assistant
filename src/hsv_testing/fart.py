@@ -31,9 +31,9 @@ def get_color_mask(hsv, hue_ranges, s_min=150, v_min=150, s_max=255, v_max=255):
         combined = cv2.bitwise_or(combined, m)
     return combined.astype(bool)[..., None]
 
-color_range = 4
-s_min, v_min = 90, 90
- 
+color_range = 9
+s_min, v_min = 160, 160
+s_max, v_max  = 245, 245
 while True:
     frame = camera.grab() # hwc, cp.uint8 BGR on GPU
     if frame is None:
@@ -41,7 +41,7 @@ while True:
 
     # GPU path: BGR -> RGB via channel reverse, then cupy kernel.
     frame_rgb_gpu = frame[..., ::-1]
-    cp_mask = cupy_red_mask(frame_rgb_gpu, color_range, s_min=s_min, v_min=v_min)
+    cp_mask = cupy_red_mask(frame_rgb_gpu, color_range, s_min=s_min, v_min=v_min, s_max = s_max, v_max = v_max)
     cp_mask_np = cp.asnumpy(cp_mask)[..., None]  # (H, W, 1) bool
 
     # CPU path: BGR -> HSV -> inRange.

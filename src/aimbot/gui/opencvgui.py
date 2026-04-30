@@ -18,7 +18,7 @@ class OpenCVGUI:
         for detection in tracked_detections:
             self._draw_rectangle(display_frame,detection)
 
-
+        # display deltas vector (scaled and unscaled)
         if raw_deltas != (0,0):
 
             #extra loop here but who cares its just debug code
@@ -50,14 +50,16 @@ class OpenCVGUI:
     def _draw_rectangle(self,display_frame:np.ndarray,detection:np.ndarray):
         #when drawing need int
         x1,y1,x2,y2 = map(int,detection[:4])
-        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 1)#bb
+        cls_id = detection[6]
+
+        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 1)
         center_bb = ((x1 + x2) // 2, (y1 + y2) // 2)
         cv2.circle(display_frame, center_bb,2, (255, 0, 204), -1)#center of bb
         if detection[6] == self.config['targeting_settings']['target_cls_id']:
             height = y2-y1
             cv2.circle(display_frame, (center_bb[0], int(center_bb[1] - height* self.config['targeting_settings']['base_head_offset'])),2, (255, 0, 204), -1)#head offset set by the user
         cv2.putText(display_frame, f"conf: {detection[5]:.2f}", (int(x1), int(y1) - 24),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(display_frame, f"cls_id: {detection[6]}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(display_frame, f"cls_id: {cls_id}", (int(x1), int(y1) - 12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             
     def cleanup(self):

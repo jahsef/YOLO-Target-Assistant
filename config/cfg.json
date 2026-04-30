@@ -47,19 +47,19 @@
         "head_toggle" : true,
         "model_predict_crosshair": false,
         "hsv_predict_crosshair": true,
-        "hsv_center_crop": [80, 80],
+        "hsv_center_crop": [360, 360],
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":true,
-        "zoom":1.3,
-        "projectile_velocity": 2700,
+        "zoom":3,
+        "projectile_velocity": 3135,
 	"zoom_interpolation_frames": 69,
-        "base_head_offset": 0.32,
+        "base_head_offset": 0.35,
 	"min_frames_to_target":4
     },
     "gui_settings":{
-        "opencv_render": false,
-        "dpg_overlay": true,
+        "opencv_render": true,
+        "dpg_overlay": false,
         "only_render_overlay_non_ads": true
     }
 
