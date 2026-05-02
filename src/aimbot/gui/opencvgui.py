@@ -51,8 +51,9 @@ class OpenCVGUI:
         #when drawing need int
         x1,y1,x2,y2 = map(int,detection[:4])
         cls_id = detection[6]
-
+        # if cls_id == 2:
         cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 204), thickness = 1)
+            
         center_bb = ((x1 + x2) // 2, (y1 + y2) // 2)
         cv2.circle(display_frame, center_bb,2, (255, 0, 204), -1)#center of bb
         if detection[6] == self.config['targeting_settings']['target_cls_id']:

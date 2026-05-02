@@ -1,13 +1,13 @@
 import cupy as cp
 import numpy as np
 
-
 _RED_MASK_KERNEL = cp.RawKernel(r"""
 extern "C" __global__
 void rgb_red_mask(const unsigned char* __restrict__ rgb,
                   unsigned char* __restrict__ mask,
                   const int n_pixels,
-                  const int color_range_half,
+                  const int color_center,
+                  const int color_range,
                   const int s_min,
                   const int v_min,
                   const int s_max,
@@ -39,20 +39,33 @@ void rgb_red_mask(const unsigned char* __restrict__ rgb,
     else               h = 120 + (30 * (r - g)) / diff;
     if (h < 0) h += 180;
 
-    bool red = (h <= color_range_half) || (h >= 179 - color_range_half);
-    mask[i] = red ? 1 : 0;
+    int d = h - color_center;
+    if (d < 0) d = -d;
+    if (d > 90) d = 180 - d;
+    mask[i] = (2 * d <= color_range) ? 1 : 0;
 }
 """, "rgb_red_mask")
 
 
-def cupy_red_mask(rgb_gpu: cp.ndarray, color_range: int,
+def cupy_red_mask(rgb_gpu: cp.ndarray, color_center: int, color_range: int,
                   s_min: int, v_min: int,
                   s_max: int = 255, v_max: int = 255) -> cp.ndarray:
-    """rgb_gpu: (H, W, 3) cp.uint8. Returns (H, W) cp.bool_."""
-    assert rgb_gpu.dtype == cp.uint8 and rgb_gpu.ndim == 3 and rgb_gpu.shape[2] == 3
-    h, w, _ = rgb_gpu.shape
-    n = h * w
-    mask_u8 = cp.empty((h, w), dtype=cp.uint8)
+    """rgb_gpu: (B, H, W, 3) cp.uint8. Returns (B, H, W) cp.bool_.
+
+    if batch dimension  doesnt exist, we convert input to have batch dimension , but return without a batch dimension
+    
+    Hue band is color_center +/- color_range/2 on OpenCV's [0, 180) scale,
+    with wraparound.
+    """
+    is_chw = False
+    if rgb_gpu.ndim == 3:
+        rgb_gpu = rgb_gpu[cp.newaxis, ...]
+        is_chw = True
+    
+    assert rgb_gpu.dtype == cp.uint8 and rgb_gpu.ndim == 4 and rgb_gpu.shape[3] == 3
+    b, h, w, _ = rgb_gpu.shape
+    n = b * h * w
+    mask_u8 = cp.empty((b, h, w), dtype=cp.uint8)
 
     rgb_contig = cp.ascontiguousarray(rgb_gpu)
 
@@ -61,19 +74,20 @@ def cupy_red_mask(rgb_gpu: cp.ndarray, color_range: int,
     _RED_MASK_KERNEL(
         (blocks,), (threads,),
         (rgb_contig, mask_u8, np.int32(n),
-         np.int32(color_range // 2),
+         np.int32(color_center), np.int32(color_range),
          np.int32(s_min), np.int32(v_min),
          np.int32(s_max), np.int32(v_max))
     )
-    return mask_u8.view(cp.bool_)
-
+    
+    return mask_u8.view(cp.bool_)[0, ...] if is_chw else mask_u8.view(cp.bool_)
 
 # Hardcoded HSV thresholds tuned empirically for this game's red crosshair
 # via src/hsv_testing/fart.py visual sweep.
-_HSV_COLOR_RANGE = 9
-_HSV_S_MIN = 120
-_HSV_S_MAX = 245
-_HSV_V_MIN = 120
+_HSV_COLOR_CENTER = 8
+_HSV_COLOR_RANGE = 12
+_HSV_S_MIN = 225
+_HSV_S_MAX = 255
+_HSV_V_MIN = 150
 _HSV_V_MAX = 245
 _HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
 # 64x64 gives better iou for jittering crosshair detections so better tracker stickiness.
@@ -82,7 +96,9 @@ _HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
 # exp(-d²/(2σ²)) = 0.25 at d = roi_half → σ = roi_half / sqrt(2*ln(4)) ≈ roi_half / 1.665
 _GAUSS_EDGE_FACTOR = 1.665  # sqrt(2 * ln(4))
 
-
+# croshair rgba(222, 40, 14) -> 8, 0.94, 0.87
+# names(1)    rgba(184, 75, 65) -> 5, 0.65, 0.72
+# names(2)    rgba(208, 84, 73) -> 5, 0.65, 0.82
 class HSVCrosshairDetector:
     """
     Red-crosshair detector backed by the fused HSV kernel + a configurable
@@ -210,7 +226,7 @@ class HSVCrosshairDetector:
         else:
             roi = rgb_frame_gpu
 
-        mask = cupy_red_mask(roi, _HSV_COLOR_RANGE, s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
+        mask = cupy_red_mask(roi, color_center= _HSV_COLOR_CENTER, color_range= _HSV_COLOR_RANGE, s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
                              v_min=_HSV_V_MIN, v_max=_HSV_V_MAX)
         vote = self._vote(mask)
         if vote is None:

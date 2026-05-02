@@ -12,7 +12,7 @@
         "right_click_toggle": true
     },
     "other": {
-        "inactive_throttle_ms": 12
+        "inactive_throttle_ms": 10
     },
     "display_settings": {
         "monitor_idx": 0
@@ -26,6 +26,8 @@
         "precision_sr_bundle": "data/models/bundled_models/b1_yolo11s_80x80_srbundle.pt",
         "_doc_bb_largest_side_threshold_override": "max(h,w) of locked target below which precision_sr fires; -1 = use bundle default baked into the .pt",
         "bb_largest_side_threshold_override": 48,
+        "_doc_precision_sr_hysteresis_frames": "if precision_sr lock is missed for up to N frames, keep cropping at last known location instead of bailing to scan. 0 = disabled (legacy).",
+        "precision_sr_hysteresis_frames": 2,
         "pt_hw_capture": [320, 320],
         "conf_threshold": 0.25,
         "union_nms_iou": 0.25
@@ -33,8 +35,8 @@
 	
     "sensitivity_settings": {
         "max_deltas": 256,
-        "overall_sens": 0.40,
-        "sens_scaling": 0.25,
+        "overall_sens": 0.50,
+        "sens_scaling": 0.33,
         "jitter_strength": 0.00,
         "overshoot_strength": 0.00,
         "overshoot_chance": 0.00
@@ -48,22 +50,22 @@
         "model_predict_crosshair": false,
         "hsv_settings": {
             "enabled": true,
-            "center_crop": [360, 360],
+            "center_crop": [240, 240],
             "_doc_voting_scheme": "simple (simple avg, med speed due to variable length), weighted_center (fastest due to dense computation), connected = largest connected component (more precise but can be the worst in terms of FP, slowest, also bad temporal stability if using a non simple dot)",
             "voting_scheme": "weighted_center"
         },
         "predict_drop": true,
 	"lead_target":true,
-	"prioritize_oldest":true,
-        "zoom":3,
-        "projectile_velocity": 2500,
+	"prioritize_oldest":false,
+        "zoom":1.5,
+        "projectile_velocity": 2925,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,
-	"min_frames_to_target":4
+	"min_frames_to_target":2
     },
     "gui_settings":{
         "opencv_render": false,
-        "dpg_overlay": false,
+        "dpg_overlay": true,
         "only_render_overlay_non_ads": true
     }
 

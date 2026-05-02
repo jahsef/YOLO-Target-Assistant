@@ -8,14 +8,11 @@ import numpy as np
 import cupy as cp
 import json
 
-from torchvision.ops import batched_nms
-
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
 
 from .data_parsing import targetselector
-from .engine import model
-from .engine.sr_bundle_engine import SRBundleEngine
+from .engine.detection_pipeline import DetectionPipeline
 from .engine.hsv_crosshair import HSVCrosshairDetector
 from .input import mousemover, inputdetector
 from .gui import gui_manager
@@ -41,8 +38,9 @@ class Aimbot:
         logging.getLogger('aimbot').setLevel(logging.getLevelNamesMapping()[self.cfg['logging']['logging_level']])
         log("Aimbot: Initializing...", "INFO")
         self._validate_targeting_config()
-        self.init_model()
-        log("init_model complete", "INFO")
+        self.pipeline = DetectionPipeline(self.cfg)
+        self.base_hw_capture = self.pipeline.base_hw_capture
+        log("DetectionPipeline initialized", "INFO")
         self.init_monitor()
         log("init_monitor complete", "INFO")
         #i think these have to be after monitor/model init
@@ -57,8 +55,6 @@ class Aimbot:
         self.fps_tracker = fpstracker.FPSTracker()
         self.init_camera()
         log("init_camera complete", "INFO")
-        self._init_hsv()
-        log("init_hsv complete", "INFO")
 
         self.target_selector = targetselector.TargetSelector(
             cfg=self.cfg,
@@ -102,51 +98,6 @@ class Aimbot:
                     f"Invalid 'hsv_settings.voting_scheme': {scheme!r}. Must be one of {list(HSVCrosshairDetector.VOTING_SCHEMES)}."
                 )
 
-    def init_model(self):
-        # base_model: always-on detector (TRT .engine or .pt).
-        # scan_sr / precision_sr: optional SR bundles. config path may be null/empty to disable.
-        base_path = Path.cwd() / self.cfg['model']['base_dir'] / self.cfg['model']['base_filename']
-        if not base_path.exists():
-            raise FileNotFoundError(f"base model missing: {base_path}")
-
-        pt_hw_capture = tuple(self.cfg['model']['pt_hw_capture'])
-        conf_threshold = self.cfg['model']['conf_threshold']
-
-        self.base_model = model.Model(base_path, hw_capture=pt_hw_capture)
-        self.base_hw_capture = self.base_model.hw_capture
-
-        scan_sr_cfg = self.cfg['model']['scan_sr_bundle']
-        precision_sr_cfg = self.cfg['model']['precision_sr_bundle']
-        bb_thresh_override = self.cfg['model']['bb_largest_side_threshold_override']
-
-        self.scan_sr = self._load_sr_bundle(scan_sr_cfg, conf_threshold, "scan_sr", bb_thresh_override)
-        self.precision_sr = self._load_sr_bundle(precision_sr_cfg, conf_threshold, "precision_sr", bb_thresh_override)
-
-        # iou for the final cross-model NMS pass (base ∪ SR), see _union_nms.
-        self.union_nms_iou = float(self.cfg['model']['union_nms_iou'])
-
-        # source-size sanity check: scan_sr must match capture region
-        if self.scan_sr is not None and self.scan_sr.source_size != int(self.base_hw_capture[0]):
-            log(
-                f"scan_sr source_size={self.scan_sr.source_size} mismatched with base capture {self.base_hw_capture}",
-                "WARNING",
-            )
-
-    def _load_sr_bundle(self, cfg_path, conf_threshold, label, bb_largest_side_threshold_override):
-        if not cfg_path:
-            log(f"{label} bundle disabled (no path configured)", "INFO")
-            return None
-        bundle_path = Path.cwd() / cfg_path
-        if not bundle_path.exists():
-            log(f"{label} bundle missing at {bundle_path} — disabling", "WARNING")
-            return None
-        log(f"loading {label} bundle from {bundle_path}", "INFO")
-        return SRBundleEngine(
-            str(bundle_path),
-            conf_threshold=conf_threshold,
-            bb_largest_side_threshold_override=bb_largest_side_threshold_override,
-        )
-
     def init_monitor(self):
         #dynamic monitor settings
         monitor_idx = self.cfg['display_settings']['monitor_idx']
@@ -172,22 +123,6 @@ class Aimbot:
         )
         self.inputdetector = inputdetector.InputDetector(input_cfg['toggle_hotkey'])
         self.inputdetector.start_input_detection()
-
-    def _init_hsv(self):
-        # Build the HSVCrosshairDetector if HSV crosshair detection is enabled.
-        # The detector owns its own scratch buffers based on the chosen scheme.
-        ts = self.cfg['targeting_settings']
-        hsv_cfg = ts['hsv_settings']
-        if not hsv_cfg['enabled']:
-            self.hsv_detector = None
-            return
-        crop = hsv_cfg['center_crop']
-        self.hsv_detector = HSVCrosshairDetector(
-            voting_scheme=hsv_cfg['voting_scheme'],
-            crosshair_cls_id=ts['crosshair_cls_id'],
-            frame_hw=self.base_hw_capture,
-            center_crop_hw=tuple(crop) if crop else None,
-        )
 
     def init_camera(self):
         # single fixed region centered on screen at base_hw_capture size.
@@ -225,7 +160,12 @@ class Aimbot:
                 if frame is None:
                     continue
 
-                results = self._run_detection_pipeline(frame)
+                results = self.pipeline.run(
+                    frame,
+                    ads=self.inputdetector.is_rmb_pressed,
+                    locked=self.target_selector._prev_detection,
+                    locked_lifetime=self.target_selector._prev_detection_lifetime,
+                )
                 results[:,0:4] = xyxy2xywh(results[:,0:4])
                 self.tracker.update(results) # expects (N, 6) [x, y, w, h, conf, cls]
                 self.tracker.multi_predict(tracks = None) # ultralytics expects stracks, our custom impl uses internal state (tracks arg unused)
@@ -275,106 +215,10 @@ class Aimbot:
             self.cleanup()
             sys.exit(1)
 
-    def _run_detection_pipeline(self, frame: cp.ndarray) -> np.ndarray:
-        """
-        Branch selection (mutually exclusive):
-          - ADS + locked SMALL target -> precision_sr only on 80x80 crop centered on the lock.
-                                         base is skipped: precision_sr's ROI doesn't cover anything
-                                         else, and the locked target is the only thing that matters.
-          - ADS + locked LARGE target -> base only (target is already easy; skip SR cost).
-          - else (scanning, or ADS w/ no lock) -> base + scan_sr, union'd then cross-model NMS'd.
-
-        Returns (M, 6) np.float32 in base-region xyxy coords.
-        """
-        ads = self.inputdetector.is_rmb_pressed
-        locked = self.target_selector._prev_detection
-
-        # SR bundles need cupy/TRT. fall back to wrapper API for .pt base.
-        if self.base_model.model_ext != ".engine":
-            model_dets = self.base_model.inference(src=frame)
-        else:
-            preprocessed = self.base_model._preprocess_cp(frame)  # (1, 3, H, W) cp.float32
-
-            if ads and locked is not None:
-                bb_max_side = max(float(locked[2] - locked[0]), float(locked[3] - locked[1]))
-                if self.precision_sr is not None and bb_max_side < self.precision_sr.bb_largest_side_threshold:
-                    log("precision sr only", level="DEBUG")
-                    model_dets_cp = self._run_precision_crop(preprocessed, locked)
-                else:
-                    log("base only", level="DEBUG")
-                    model_dets_cp = self.base_model.model.inference_cp(preprocessed)
-            else:
-                # scanning path: base + scan_sr concatenated, then cross-model NMS to dedupe overlap.
-                # both arms already NMS internally (baked NMS for base; cross-patch NMS in SRBundleEngine);
-                # this final pass only catches the *between-model* duplicates. wasteful but cheap.
-                log("base + scan_sr", level="DEBUG")
-                base_res = self.base_model.model.inference_cp(preprocessed)
-                if self.scan_sr is not None:
-                    sr_res = self.scan_sr.inference_cp(preprocessed)[0]  # strip batch dim
-                    if sr_res.shape[0]:
-                        base_res = self._union_nms(cp.concatenate([base_res, sr_res], axis=0))
-                model_dets_cp = base_res
-
-            model_dets = cp.asnumpy(model_dets_cp)
-
-        return self._apply_crosshair_routing(model_dets, frame)
-
-    def _apply_crosshair_routing(self, model_dets: np.ndarray, frame_rgb_gpu: cp.ndarray) -> np.ndarray:
-        """Filter model crosshair-class dets and/or append HSV-derived crosshair dets per cfg.
-
-        model_dets: (M, 6) np.float32 [x1, y1, x2, y2, conf, cls] in base-region coords.
-        frame_rgb_gpu: raw uint8 (H, W, 3) RGB cupy frame -- HSV path needs the un-preprocessed pixels.
-        """
-        ts = self.cfg['targeting_settings']
-        crosshair_cls_id = ts['crosshair_cls_id']
-
-        if not ts['model_predict_crosshair']:
-            model_dets = model_dets[model_dets[:, 5] != crosshair_cls_id]
-
-        if self.hsv_detector is not None:
-            hsv_row = self.hsv_detector.detect(frame_rgb_gpu)
-            if hsv_row.shape[0]:
-                model_dets = np.concatenate([model_dets, hsv_row], axis=0)
-
-        return model_dets
-
-    def _union_nms(self, dets: cp.ndarray) -> cp.ndarray:
-        """Class-aware NMS over a concatenation of detections from multiple models.
-
-        Input: cupy (N, 6) [x1,y1,x2,y2,conf,cls].
-        Output: cupy (M, 6), M <= N, deduped within each class.
-        """
-        if dets.shape[0] == 0:
-            return dets
-        t = torch.from_dlpack(dets)
-        boxes = t[:, :4]
-        scores = t[:, 4]
-        classes = t[:, 5].long()
-        keep = batched_nms(boxes, scores, classes, self.union_nms_iou)
-        return cp.from_dlpack(t[keep])
-
-    def _run_precision_crop(self, preprocessed: cp.ndarray, locked: np.ndarray) -> cp.ndarray:
-        """80x80 crop centered on the locked target, run through precision_sr,
-        translate detections back to base-region coords. Returns cupy (M, 6)."""
-        p = self.precision_sr.source_size
-        H, W = int(preprocessed.shape[2]), int(preprocessed.shape[3])
-        cx = float((locked[0] + locked[2]) * 0.5)
-        cy = float((locked[1] + locked[3]) * 0.5)
-        x0 = int(max(0, min(W - p, round(cx - p / 2))))
-        y0 = int(max(0, min(H - p, round(cy - p / 2))))
-        crop = cp.ascontiguousarray(preprocessed[:, :, y0:y0 + p, x0:x0 + p])
-        out = self.precision_sr.inference_cp(crop)[0]  # cupy (M, 6) in 80x80 local coords
-        if out.shape[0]:
-            out[:, 0] += x0
-            out[:, 2] += x0
-            out[:, 1] += y0
-            out[:, 3] += y0
-        return out
-
     def setup_bytetracker(self):
         #if engine is running just going to assume 144 is the target frame rate
         #if pt model is running its probably debug screen so 30
-        target_frame_rate = 144 if self.base_model.model_ext == ".engine" else 30
+        target_frame_rate = 144 if self.pipeline.base_model.model_ext == ".engine" else 30
         args = Namespace(
             track_high_thresh=0.65,
             track_low_thresh=0.4,
@@ -406,6 +250,16 @@ class Aimbot:
 
 
     def cleanup(self):
+        # Most of this is theater. Python GC + sys.exit handle nearly everything:
+        # plain `del`/`= None` and `pipeline.cleanup()` (which itself just dels) are
+        # redundant — refs drop on process exit and __del__ chains run automatically.
+        # `torch.cuda.empty_cache()` returns cached pool memory but the OS reclaims
+        # everything anyway when the process dies. Leaving it for cosmetic shutdown
+        # logging more than anything.
+        # The two things that actually matter:
+        #   - camera.release(): betterercam holds OS capture handles (DXGI/nvidia),
+        #     releasing avoids leaving them dangling if we ever do an in-process restart.
+        #   - gui_manager.cleanup(): destroys cv2 windows / DPG context cleanly.
         log("STARTING CLEANUP", "INFO")
         try:
             if hasattr(self, 'camera') and self.camera:
@@ -419,15 +273,10 @@ class Aimbot:
                 self.gui_manager.cleanup()
                 del self.gui_manager
                 self.gui_manager = None
-            if hasattr(self, 'base_model'):
-                log('Removing base_model', "INFO")
-                del self.base_model
-            if hasattr(self, 'scan_sr') and self.scan_sr is not None:
-                log('Removing scan_sr', "INFO")
-                del self.scan_sr
-            if hasattr(self, 'precision_sr') and self.precision_sr is not None:
-                log('Removing precision_sr', "INFO")
-                del self.precision_sr
+            if hasattr(self, 'pipeline'):
+                log('Cleaning up DetectionPipeline', "INFO")
+                self.pipeline.cleanup()
+                del self.pipeline
             torch.cuda.empty_cache()
         except Exception as e:
             log(f"Cleanup error: {e}", "ERROR")

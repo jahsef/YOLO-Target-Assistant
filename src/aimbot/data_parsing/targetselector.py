@@ -121,7 +121,12 @@ class TargetSelector:
           latter on release. Affects FOV in distance/drop math.
 
     Internal state worth knowing about:
-      - _prev_detection: latest top-priority enemy row (8-col tracker output) or None.
+      - _prev_detection: latest top-priority enemy row (10-col tracker output) or None.
+        Retained across frames where no fresh enemy is picked — pair with
+        _prev_detection_lifetime to know how stale it is.
+      - _prev_detection_lifetime: 0 = updated this frame, N = N frames since the
+        last fresh pick. Used by the precision_sr hysteresis path so the pipeline
+        can keep cropping at the cached location for a configurable grace window.
       - target_lru: OrderedDict of recently-seen track_ids; used for "stick to oldest
         target" behavior with 50% hysteresis (see _get_highest_priority_target).
       - buffer (RingBuffer2D): rolling history of mouse deltas for lead prediction.
@@ -138,9 +143,9 @@ class TargetSelector:
             ):
         # Tuning constants
         #for lead (momentum based leading)
-        self.MOVEMENT_BUFFER_LENGTH = 90
+        self.MOVEMENT_BUFFER_LENGTH = 60
         self.WMA_VELOCITY_THRESHOLD = 72 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
-        self.BASE_LEAD_SENS = 0.45
+        self.BASE_LEAD_SENS = 0.24
         self.LEAD_AGE_WARMUP_FRAMES = 24 # linear warmup: 0 lead at age 0, full lead at this age
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
@@ -154,7 +159,7 @@ class TargetSelector:
         self.GRAVITY = 128  # Roblox default studs/s^2
         self.TARGET_REAL_HEIGHT = 5
         self.TARGET_REAL_WIDTH = 3.5
-        self.DISTANCE_CALIBRATION_FACTOR = 0.425
+        self.DISTANCE_CALIBRATION_FACTOR = 0.42
         
         
 
@@ -190,9 +195,12 @@ class TargetSelector:
         #1.5 pixels avg jitter /frame pretyty conservative
         self.target_lru = OrderedDict()
         self.last_target_id = None #for target-aware momentum decay
-        # last selected enemy detection row (8-col tracker output), or None.
-        # exposed for external precision-crop logic in aimbot main loop.
+        # last selected enemy detection row (10-col tracker output), or None.
+        # exposed for external precision-crop logic in aimbot main loop. retained
+        # across empty-pick frames so precision_sr hysteresis can crop at the
+        # last known location; pair with _prev_detection_lifetime.
         self._prev_detection = None
+        self._prev_detection_lifetime = 0  # 0 = updated this frame; N = N frames stale
         
 
     def update_detection_window_center(self, window_dim):
@@ -399,25 +407,33 @@ class TargetSelector:
             Pulling from the freshest tracker frame here guarantees the next branch decision
             reflects what's actually on screen right now, not what we last aimed at.
         """
+        # On empty / no-enemy frames we INTENTIONALLY retain the previous pick and just
+        # tick the lifetime counter. The pipeline reads (_prev_detection, lifetime) and
+        # decides whether the stale lock is still in its hysteresis budget for routing.
         if len(detections) == 0:
-            self._prev_detection = None
+            self._prev_detection_lifetime += 1
             return
         cls_mask = detections[:, 6] == self.target_cls_id
         if np.count_nonzero(cls_mask) == 0:
-            self._prev_detection = None
+            self._prev_detection_lifetime += 1
             return
         enemies = detections[cls_mask]
         crosshair = self._get_crosshair(detections)
         # always use highest-priority (LRU + hysteresis) regardless of prioritize_oldest cfg —
         # routing only cares about "is there a small enemy worth precision-cropping", not which
         # specific one we'd aim at. _get_highest_priority_target falls back to closest internally.
-        self._prev_detection = self._get_highest_priority_target(enemies, crosshair)
+        pick = self._get_highest_priority_target(enemies, crosshair)
+        if pick is None:
+            self._prev_detection_lifetime += 1
+        else:
+            self._prev_detection = pick
+            self._prev_detection_lifetime = 0
 
     def get_deltas(self,detections:np.ndarray):
         """
-        processes detection array of shape (n, 8) where columns are:
+        processes detection array of shape (n, 10) where columns are:
 
-        [x1, y1, x2, y2, track_id, confidence, class_id, Strack idx]
+        [x1, y1, x2, y2, track_id, confidence, class_id, Strack idx, start_frame, last_frame]
         """
         cls_mask = detections[:,6] == self.target_cls_id
         if np.count_nonzero(cls_mask) != 0:#checking if any targets exist

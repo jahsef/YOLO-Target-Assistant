@@ -10,7 +10,6 @@ or use bayesian optimizaiton because its cool
 fix base data
 semi supervised using augmentation invariance (STAC, or other semi supervised methods)
 
-tracker from scratch (but actually follow through this time) (would need to do on gpu to make it worth) (cupy tracker proved poop, new vectorized tracker only better for like 5+ targets which is rare)
 
 could update RSI harmonic dampening to allow rsi = 20 or 'oversold' to allow MORE movement to move through. however just dampening is probably the safest default
 
@@ -28,3 +27,7 @@ HYSTERESIS (the actual bad-feel sources)
 - missed-detection in crop: if precision sr model misses a single frame, then we are fucked. add 1-2 frame hysteresis for crop locations
 
 bilinear simplification + sticky routing + small-window grace = the next coherent unit of work.
+
+HSV CONV-GATED VOTING SCHEME
+- avg_pool2d(k=4, s=2) on mask → argmax patch → gate mask to that window → weighted_center on gated mask.
+- top-K patches or last-frame stickiness to avoid argmax flipping between near-tied blobs.
