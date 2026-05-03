@@ -480,13 +480,14 @@ class TargetSelector:
         
                 aim_x += lead_pixels_x#sort of acts like a momentum factor while also leading shots
                 aim_y += lead_pixels_y
-        
+                
+            log(f'\npredicted dist: {predicted_dist}', "DEBUG")
+            log(f'predicted bullet travel time: {predicted_bullet_travel_time}', "DEBUG")
+            log(f'predicted screen drop:{screen_drop}', "DEBUG")
         aim_xy = (aim_x, aim_y) #since tuples immutable
         deltas = self._get_deltas(aim_xy,crosshair)
 
-        log(f'\npredicted dist: {predicted_dist}', "DEBUG")
-        log(f'predicted bullet travel time: {predicted_bullet_travel_time}', "DEBUG")
-        log(f'predicted screen drop:{screen_drop}', "DEBUG")
+
         log(f'aim_xy: {aim_xy}', "DEBUG")
         log(f'deltas: {deltas}', "DEBUG")
 

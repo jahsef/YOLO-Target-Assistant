@@ -1,5 +1,7 @@
 import cupy as cp
 import numpy as np
+import torch
+import torch.nn as nn
 
 _RED_MASK_KERNEL = cp.RawKernel(r"""
 extern "C" __global__
@@ -83,9 +85,9 @@ def cupy_red_mask(rgb_gpu: cp.ndarray, color_center: int, color_range: int,
 
 # Hardcoded HSV thresholds tuned empirically for this game's red crosshair
 # via src/hsv_testing/fart.py visual sweep.
-_HSV_COLOR_CENTER = 8
+_HSV_COLOR_CENTER = 6
 _HSV_COLOR_RANGE = 12
-_HSV_S_MIN = 225
+_HSV_S_MIN = 170
 _HSV_S_MAX = 255
 _HSV_V_MIN = 150
 _HSV_V_MAX = 245
@@ -95,6 +97,28 @@ _HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
 # Sigma chosen so corner weight ≈ 0.25 * center weight:
 # exp(-d²/(2σ²)) = 0.25 at d = roi_half → σ = roi_half / sqrt(2*ln(4)) ≈ roi_half / 1.665
 _GAUSS_EDGE_FACTOR = 1.665  # sqrt(2 * ln(4))
+
+# heuristic_spam args (prototype-tuned in src/tests/fart_avgpool.py).
+# row-suppression: kill mask pixels where row_sum[y] > _HS_RATIO_THRESHOLD * col_sum[x],
+# applied pre-opening so opening sees nametag-free input.
+_HS_RATIO_THRESHOLD = 1.5
+# top-K argmax patches considered for cluster-spread analysis.
+_HS_TOP_K = 48
+# scatter threshold in sqrt(input pixel) units; mean sqrt-distance of valid top-K
+# members from their centroid above this -> fall through to multi-element mode.
+_HS_SCATTER_THRESHOLD = 5.0
+# small-dot ROI side length (input pixels) around argmax patch for centroid.
+_HS_SMALL_ROI_HW = 24
+
+
+class _MinPool2d(nn.Module):
+    """min(x) = -max(-x). pytorch has no min-pool primitive."""
+    def __init__(self, kernel_size, stride=1, padding=0):
+        super().__init__()
+        self.mp = nn.MaxPool2d(kernel_size, stride, padding)
+
+    def forward(self, x):
+        return -self.mp(-x)
 
 # croshair rgba(222, 40, 14) -> 8, 0.94, 0.87
 # names(1)    rgba(184, 75, 65) -> 5, 0.65, 0.72
@@ -119,9 +143,15 @@ class HSVCrosshairDetector:
       "connected":       largest connected red component centroid. most robust
                          (e.g. survives red enemy uniforms leaking into ROI), but
                          pays for cupyx.scipy.ndimage.label which is the slowest path.
+      "heuristic_spam":  row-suppression + morphological opening + avgpool density +
+                         top-K scatter analysis -> small-dot ROI centroid OR multi-
+                         element weighted_center. handles dot reticles, fat dots, and
+                         ring sights via a dual-mode switch. priciest scheme; ~2.5ms
+                         on 320x320 in synthetic bench. shares weighted_center buffers
+                         for the multi-element fallback.
     """
 
-    VOTING_SCHEMES = ("simple", "weighted_center", "connected")
+    VOTING_SCHEMES = ("simple", "weighted_center", "connected", "heuristic_spam")
 
     def __init__(
         self,
@@ -155,12 +185,16 @@ class HSVCrosshairDetector:
             "simple": self._vote_simple,
             "weighted_center": self._vote_weighted_center,
             "connected": self._vote_connected,
+            "heuristic_spam": self._vote_heuristic_spam,
         }
         self._vote = vote_fn_map[voting_scheme]
 
-        # Scheme-specific buffer init.
-        if voting_scheme == "weighted_center":
+        # Scheme-specific buffer init. heuristic_spam reuses weighted_center buffers
+        # for its multi-element fallback path.
+        if voting_scheme in ("weighted_center", "heuristic_spam"):
             self._init_weighted_center_buffers()
+        if voting_scheme == "heuristic_spam":
+            self._init_heuristic_spam_buffers()
 
     # --- buffer init ----------------------------------------------------------
 
@@ -181,6 +215,22 @@ class HSVCrosshairDetector:
         self._w_weights = weights
         self._w_wm = cp.empty((h, w), dtype=cp.float32)  # scratch for weights*mask
 
+    def _init_heuristic_spam_buffers(self):
+        # opening: erosion (k=2 minpool with asymmetric pad to keep size) -> dilation
+        # (k=3 maxpool same-pad). zero-pad shifts the asymmetric k=2 window so output
+        # shape matches input.
+        self._opening = nn.Sequential(
+            nn.ZeroPad2d((1, 0, 1, 0)),
+            _MinPool2d(kernel_size=2, stride=1),
+            nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+        ).cuda().eval()
+        # density: 2 stride-2 avgpool layers -> ~4x downsample with same-pad.
+        # output stride per dim = 4 for 320x320 -> 80x80 grid.
+        self._density = nn.Sequential(
+            nn.AvgPool2d(kernel_size=3, stride=2, padding=1),
+            nn.AvgPool2d(kernel_size=3, stride=2, padding=1),
+        ).cuda().eval()
+
     # --- voting ---------------------------------------------------------------
 
     def _vote_simple(self, mask: cp.ndarray):
@@ -189,7 +239,10 @@ class HSVCrosshairDetector:
             return None
         return float(ys.mean()), float(xs.mean())
 
-    def _vote_weighted_center(self, mask: cp.ndarray):
+    def _weighted_center_inner(self, mask: cp.ndarray):
+        """Gaussian-weighted center over the input mask. Mask must be (roi_h, roi_w)
+        bool or {0,1}-valued float. Reused by _vote_weighted_center and by the multi-
+        element fallback in _vote_heuristic_spam."""
         cp.multiply(self._w_weights, mask, out=self._w_wm)  # mask broadcasts bool->0/1
         total = float(self._w_wm.sum())
         if total <= 0.0:
@@ -197,6 +250,9 @@ class HSVCrosshairDetector:
         cy = float((self._w_wm * self._w_ys).sum()) / total
         cx = float((self._w_wm * self._w_xs).sum()) / total
         return cy, cx
+
+    def _vote_weighted_center(self, mask: cp.ndarray):
+        return self._weighted_center_inner(mask)
 
     def _vote_connected(self, mask: cp.ndarray):
         from cupyx.scipy.ndimage import label  # lazy import; only loaded if scheme used
@@ -210,6 +266,83 @@ class HSVCrosshairDetector:
         if ys.size == 0:
             return None
         return float(ys.mean()), float(xs.mean())
+
+    def _vote_heuristic_spam(self, mask: cp.ndarray):
+        """Multi-stage pipeline: row-suppress -> opening -> avgpool density ->
+        top-K argmax -> scatter check -> small-dot ROI centroid OR multi-element
+        weighted_center fallback. See src/tests/fart_avgpool.py for the visual
+        prototype each stage was tuned in."""
+        H, W = self.roi_h, self.roi_w
+
+        # row-suppression (kill horizontal stripes e.g. red nametags) on raw mask
+        # before opening so opening doesn't dilate nametag remnants back.
+        mask_u8 = mask.astype(cp.uint8)
+        row_sum = mask_u8.sum(axis=1, keepdims=True)              # (H, 1)
+        col_sum = mask_u8.sum(axis=0, keepdims=True)              # (1, W)
+        suppress = row_sum > _HS_RATIO_THRESHOLD * col_sum        # (H, W) via broadcast
+        mask_filtered = mask & ~suppress                          # (H, W) bool
+
+        # opening + density via torch on a dlpack-bridged float32 view of the mask.
+        mask_f32 = mask_filtered.astype(cp.float32)
+        mask_t = torch.from_dlpack(mask_f32)[None, None, ...]
+        with torch.no_grad():
+            opened = self._opening(mask_t)                         # (1,1,H,W) {0,1}
+            pooled = self._density(opened)[0, 0]                   # (Hp, Wp)
+
+        Hp, Wp = pooled.shape
+        stride_y = H / Hp
+        stride_x = W / Wp
+        roi_half = _HS_SMALL_ROI_HW // 2
+
+        # top-K argmax positions in pooled grid.
+        flat = pooled.flatten()
+        K = min(_HS_TOP_K, flat.numel())
+        vals, idxs = flat.topk(K)
+        ys_top = (idxs // Wp).float()
+        xs_top = (idxs % Wp).float()
+        top1_val = float(vals[0])
+        if top1_val <= 0.0:
+            return None
+
+        # mean sqrt-of-L2 dist (input-pixel units) of valid top-K from their centroid.
+        # sqrt compresses outliers — a couple of far-away patches don't dominate.
+        valid = vals > 0
+        n_valid = int(valid.sum().item())
+        if n_valid > 1:
+            valid_ys = ys_top[valid]
+            valid_xs = xs_top[valid]
+            cy_topk = valid_ys.mean()
+            cx_topk = valid_xs.mean()
+            dy = (valid_ys - cy_topk) * stride_y
+            dx = (valid_xs - cx_topk) * stride_x
+            l2 = torch.sqrt(dy * dy + dx * dx)
+            mean_dist = float(torch.sqrt(l2).mean())
+        else:
+            mean_dist = 0.0
+
+        if mean_dist <= _HS_SCATTER_THRESHOLD:
+            # SMALL-DOT MODE: argmax patch + ROI centroid on opened mask. argmax was
+            # computed over density(opened) so opened in the patch's RF is non-empty
+            # by construction whenever top1_val > 0.
+            py0 = int(ys_top[0].item())
+            px0 = int(xs_top[0].item())
+            cy_op = py0 * stride_y                                # corner-aligned
+            cx_op = px0 * stride_x
+            y_lo = max(0, int(cy_op - roi_half))
+            y_hi = min(H, int(cy_op + roi_half))
+            x_lo = max(0, int(cx_op - roi_half))
+            x_hi = min(W, int(cx_op + roi_half))
+            opened_cp = cp.from_dlpack(opened.detach())[0, 0]
+            roi_mask = opened_cp[y_lo:y_hi, x_lo:x_hi] > 0
+            cys, cxs = cp.where(roi_mask)
+            if cys.size == 0:
+                return cy_op, cx_op  # fallback to patch center (shouldn't normally hit)
+            return float(cys.mean()) + y_lo, float(cxs.mean()) + x_lo
+
+        # MULTI-ELEMENT MODE: weighted_center on the opened mask. shares buffers
+        # with _vote_weighted_center via _weighted_center_inner.
+        opened_cp = cp.from_dlpack(opened.detach())[0, 0]
+        return self._weighted_center_inner(opened_cp)
 
     # --- public entry point ---------------------------------------------------
 

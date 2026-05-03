@@ -1,20 +1,11 @@
-remove crosshair class entirely [DONE]
-- HSV red-mask path shipped (src/aimbot/engine/hsv_crosshair.py + cfg flags model_predict_crosshair / hsv_predict_crosshair). real-usage win: targets no longer occluded by the big crosshair the model needed to see.
-- still want to retire crosshair_cls_id from training data so YOLO capacity goes fully to enemies.
-
-labeled dataset for hsv detection params color range and center, min,max of v/s then using grid search / bayesian.
-100 images of hsv filtering with the cupy kernel should be insanely fast (19k fps supposedly in batch 1)
-so batched filtering we should be able to grid search like 1000 combinations in a second
-or use bayesian optimizaiton because its cool
-
-fix base data
-semi supervised using augmentation invariance (STAC, or other semi supervised methods)
-
+fix base data (relabel base set, label some of the unlabeled set for generalization)
+semi supervised using augmentation invariance (STAC, or other semi supervised methods) for rest of unlabeled im too lazy to label
 
 could update RSI harmonic dampening to allow rsi = 20 or 'oversold' to allow MORE movement to move through. however just dampening is probably the safest default
+could try bollinger bands and possibly autocorr for our momentum vs mean reversion routing
 
 REAL-USAGE FINDINGS (after shipping)
-- scan_sr: net negative. false positives noticeable in scanning running with scan_sr disabled (config: scan_sr_bundle = "") feels better. worst case is FP when on ur gun, pulling down aim to floor
+- scan_sr: false positives noticeable in scanning
 - precision_sr: clear feel improvement on small/distant targets when ADS-locked. keep this path.
 
 NEXT: REPLACE PRECISION SR WITH BILINEAR + ADD HYSTERESIS
@@ -25,9 +16,17 @@ NEXT: REPLACE PRECISION SR WITH BILINEAR + ADD HYSTERESIS
 HYSTERESIS (the actual bad-feel sources)
 - bb-size boundary thrashing: target with max(h,w) hovering around bb_largest_side_threshold flips between base-only and precision-crop every frame. add asymmetric thresholds (enter precision at < T_low, leave at > T_high, e.g. T_low=48, T_high=64) so the routing decision is sticky.
 - missed-detection in crop: if precision sr model misses a single frame, then we are fucked. add 1-2 frame hysteresis for crop locations
+(added hysteresis for N frames already, need to implement bb size hysteresis still)
 
 bilinear simplification + sticky routing + small-window grace = the next coherent unit of work.
 
 HSV CONV-GATED VOTING SCHEME
 - avg_pool2d(k=4, s=2) on mask → argmax patch → gate mask to that window → weighted_center on gated mask.
 - top-K patches or last-frame stickiness to avoid argmax flipping between near-tied blobs.
+
+HSV DUAL-MODE
+- opening (minpool→maxpool) + avgpool stack as front-end. mode select via top-K argmax spread: cluster → small-dot (centroid in argmax ROI), scatter → multi-element (weighted_center on opened mask).
+- thin reticles eaten by erosion. template matching skipped (authoring cost). connected-components deprioritized.
+
+
+move momentum args / other magic numbers from src.aimbot.data_parsing.targetselector to config

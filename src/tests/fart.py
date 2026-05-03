@@ -35,9 +35,9 @@ color_range = 9
 s_min, v_min = 160, 160
 s_max, v_max  = 245, 245
 #cupy kernel args #[  0.     25.373 203.192  54.124 201.011 102.482]
-_HSV_COLOR_CENTER = 8
+_HSV_COLOR_CENTER = 6
 _HSV_COLOR_RANGE = 12
-_HSV_S_MIN = 210
+_HSV_S_MIN = 170
 _HSV_S_MAX = 255
 _HSV_V_MIN = 150
 _HSV_V_MAX = 245

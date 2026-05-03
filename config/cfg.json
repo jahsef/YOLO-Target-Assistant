@@ -50,15 +50,15 @@
         "model_predict_crosshair": false,
         "hsv_settings": {
             "enabled": true,
-            "center_crop": [240, 240],
-            "_doc_voting_scheme": "simple (simple avg, med speed due to variable length), weighted_center (fastest due to dense computation), connected = largest connected component (more precise but can be the worst in terms of FP, slowest, also bad temporal stability if using a non simple dot)",
-            "voting_scheme": "weighted_center"
+            "center_crop": [320, 320],
+            "_doc_voting_scheme": "simple, weighted_center, connected, heuristic_spam",
+            "voting_scheme": "heuristic_spam"
         },
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":false,
-        "zoom":1.5,
-        "projectile_velocity": 2925,
+        "zoom":4,
+        "projectile_velocity": 1350,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,
 	"min_frames_to_target":2
