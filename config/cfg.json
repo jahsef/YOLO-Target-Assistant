@@ -57,8 +57,8 @@
         "predict_drop": true,
 	"lead_target":true,
 	"prioritize_oldest":false,
-        "zoom":4,
-        "projectile_velocity": 1350,
+        "zoom":1.2,
+        "projectile_velocity": 2525,
 	"zoom_interpolation_frames": 69,
         "base_head_offset": 0.35,
 	"min_frames_to_target":2

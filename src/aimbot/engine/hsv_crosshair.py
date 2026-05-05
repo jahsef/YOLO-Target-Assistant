@@ -98,17 +98,10 @@ _HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
 # exp(-d²/(2σ²)) = 0.25 at d = roi_half → σ = roi_half / sqrt(2*ln(4)) ≈ roi_half / 1.665
 _GAUSS_EDGE_FACTOR = 1.665  # sqrt(2 * ln(4))
 
-# heuristic_spam args (prototype-tuned in src/tests/fart_avgpool.py).
+# heuristic_spam args.
 # row-suppression: kill mask pixels where row_sum[y] > _HS_RATIO_THRESHOLD * col_sum[x],
 # applied pre-opening so opening sees nametag-free input.
 _HS_RATIO_THRESHOLD = 1.5
-# top-K argmax patches considered for cluster-spread analysis.
-_HS_TOP_K = 48
-# scatter threshold in sqrt(input pixel) units; mean sqrt-distance of valid top-K
-# members from their centroid above this -> fall through to multi-element mode.
-_HS_SCATTER_THRESHOLD = 5.0
-# small-dot ROI side length (input pixels) around argmax patch for centroid.
-_HS_SMALL_ROI_HW = 24
 
 
 class _MinPool2d(nn.Module):
@@ -119,6 +112,38 @@ class _MinPool2d(nn.Module):
 
     def forward(self, x):
         return -self.mp(-x)
+
+
+# Fused row-suppression kernel.
+# Replaces the multi-op cupy chain that was previously:
+#   mask_u8 = mask.astype(cp.uint8)                            # cast kernel
+#   row_sum = mask_u8.sum(axis=1, keepdims=True)               # reduction kernel
+#   col_sum = mask_u8.sum(axis=0, keepdims=True)               # reduction kernel
+#   suppress = row_sum > _HS_RATIO_THRESHOLD * col_sum         # broadcast compare kernel
+#   mask_filtered = mask & ~suppress                           # boolean AND kernel
+# 5 kernel launches + 5 intermediate allocations. Bench showed ~0.33 ms.
+# The two reductions can't be fused trivially (need full row/col sums before per-pixel apply),
+# but the broadcast-compare + AND CAN — that's what this kernel does. Reductions stay as
+# native cp.sum (CUB-backed, already optimal); kernel does the per-pixel decision in one pass.
+_ROW_SUPPRESS_KERNEL = cp.RawKernel(r"""
+extern "C" __global__
+void row_suppress_apply(const unsigned char* __restrict__ mask,
+                        const long long*    __restrict__ row_sum,
+                        const long long*    __restrict__ col_sum,
+                        unsigned char*      __restrict__ out,
+                        const int H,
+                        const int W,
+                        const float ratio) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = H * W;
+    if (idx >= total) return;
+    int y = idx / W;
+    int x = idx % W;
+    // suppress when row is more than ratio*col times wider than column is tall.
+    bool suppress = ((float)row_sum[y]) > ratio * ((float)col_sum[x]);
+    out[idx] = (mask[idx] && !suppress) ? 1 : 0;
+}
+""", "row_suppress_apply")
 
 # croshair rgba(222, 40, 14) -> 8, 0.94, 0.87
 # names(1)    rgba(184, 75, 65) -> 5, 0.65, 0.72
@@ -143,12 +168,15 @@ class HSVCrosshairDetector:
       "connected":       largest connected red component centroid. most robust
                          (e.g. survives red enemy uniforms leaking into ROI), but
                          pays for cupyx.scipy.ndimage.label which is the slowest path.
-      "heuristic_spam":  row-suppression + morphological opening + avgpool density +
-                         top-K scatter analysis -> small-dot ROI centroid OR multi-
-                         element weighted_center. handles dot reticles, fat dots, and
-                         ring sights via a dual-mode switch. priciest scheme; ~2.5ms
-                         on 320x320 in synthetic bench. shares weighted_center buffers
-                         for the multi-element fallback.
+      "heuristic_spam":  row-suppression (fused kernel) + morphological opening +
+                         density downsample (2x stride-2 avgpools) + weighted_center
+                         on the density output (coarse). small FPs (nametags, tracers,
+                         random red gear) get smoothed into near-zero density by
+                         downsampling, while the reticle's concentrated mass dominates.
+                         bench_fine_vs_coarse_fp.py shows ~40% lower centroid error vs
+                         running weighted_center directly on the opened mask in FP-heavy
+                         scenes. uses its own buffers at density resolution — distinct
+                         from "weighted_center" scheme's full-resolution buffers.
     """
 
     VOTING_SCHEMES = ("simple", "weighted_center", "connected", "heuristic_spam")
@@ -189,17 +217,21 @@ class HSVCrosshairDetector:
         }
         self._vote = vote_fn_map[voting_scheme]
 
-        # Scheme-specific buffer init. heuristic_spam reuses weighted_center buffers
-        # for its multi-element fallback path.
-        if voting_scheme in ("weighted_center", "heuristic_spam"):
-            self._init_weighted_center_buffers()
+        # Scheme-specific buffer init. heuristic_spam runs weighted_center at the
+        # density-output resolution (coarse), so it owns its own buffers separately.
+        if voting_scheme == "weighted_center":
+            self._w_ys, self._w_xs, self._w_weights, self._w_wm = (
+                self._make_wc_buffers(self.roi_h, self.roi_w)
+            )
         if voting_scheme == "heuristic_spam":
             self._init_heuristic_spam_buffers()
 
     # --- buffer init ----------------------------------------------------------
 
-    def _init_weighted_center_buffers(self):
-        h, w = self.roi_h, self.roi_w
+    def _make_wc_buffers(self, h: int, w: int):
+        """Build Gaussian weighted-center buffers at (h, w). Returns
+        (ys, xs, weights, wm). Used by both 'weighted_center' (full-res) and
+        'heuristic_spam' (density-res) schemes."""
         ys = cp.arange(h, dtype=cp.float32).reshape(h, 1)
         xs = cp.arange(w, dtype=cp.float32).reshape(1, w)
         cy = (h - 1) * 0.5
@@ -210,10 +242,8 @@ class HSVCrosshairDetector:
             -(((ys - cy) ** 2) / (2.0 * sigma_y * sigma_y)
               + ((xs - cx) ** 2) / (2.0 * sigma_x * sigma_x))
         ).astype(cp.float32)
-        self._w_ys = ys
-        self._w_xs = xs
-        self._w_weights = weights
-        self._w_wm = cp.empty((h, w), dtype=cp.float32)  # scratch for weights*mask
+        wm = cp.empty((h, w), dtype=cp.float32)  # scratch for weights*mask
+        return ys, xs, weights, wm
 
     def _init_heuristic_spam_buffers(self):
         # opening: erosion (k=2 minpool with asymmetric pad to keep size) -> dilation
@@ -224,12 +254,24 @@ class HSVCrosshairDetector:
             _MinPool2d(kernel_size=2, stride=1),
             nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
         ).cuda().eval()
-        # density: 2 stride-2 avgpool layers -> ~4x downsample with same-pad.
-        # output stride per dim = 4 for 320x320 -> 80x80 grid.
+        # density: 2 stride-2 avgpool layers -> 4x downsample with same-pad. exact output
+        # shape depends on roi dims (computed via dummy forward below).
         self._density = nn.Sequential(
             nn.AvgPool2d(kernel_size=3, stride=2, padding=1),
             nn.AvgPool2d(kernel_size=3, stride=2, padding=1),
         ).cuda().eval()
+        # probe density output shape so weighted_center buffers can match.
+        with torch.no_grad():
+            dummy = torch.zeros((1, 1, self.roi_h, self.roi_w), device='cuda')
+            dh, dw = self._density(dummy).shape[2:]
+        self._hs_dh, self._hs_dw = int(dh), int(dw)
+        # corner-aligned stride for mapping density-coords back to roi-pixel-coords.
+        self._hs_stride_y = self.roi_h / self._hs_dh
+        self._hs_stride_x = self.roi_w / self._hs_dw
+        # coarse weighted_center buffers at density resolution.
+        self._hs_ys, self._hs_xs, self._hs_weights, self._hs_wm = (
+            self._make_wc_buffers(self._hs_dh, self._hs_dw)
+        )
 
     # --- voting ---------------------------------------------------------------
 
@@ -239,20 +281,22 @@ class HSVCrosshairDetector:
             return None
         return float(ys.mean()), float(xs.mean())
 
-    def _weighted_center_inner(self, mask: cp.ndarray):
-        """Gaussian-weighted center over the input mask. Mask must be (roi_h, roi_w)
-        bool or {0,1}-valued float. Reused by _vote_weighted_center and by the multi-
-        element fallback in _vote_heuristic_spam."""
-        cp.multiply(self._w_weights, mask, out=self._w_wm)  # mask broadcasts bool->0/1
-        total = float(self._w_wm.sum())
+    def _weighted_center_inner(self, mask: cp.ndarray, ys: cp.ndarray, xs: cp.ndarray,
+                               weights: cp.ndarray, wm: cp.ndarray):
+        """Gaussian-weighted center over `mask` using precomputed buffers. Mask shape
+        must match the buffers' shape. Reused at both full-res and density-res."""
+        cp.multiply(weights, mask, out=wm)  # mask broadcasts bool->0/1
+        total = float(wm.sum())
         if total <= 0.0:
             return None
-        cy = float((self._w_wm * self._w_ys).sum()) / total
-        cx = float((self._w_wm * self._w_xs).sum()) / total
+        cy = float((wm * ys).sum()) / total
+        cx = float((wm * xs).sum()) / total
         return cy, cx
 
     def _vote_weighted_center(self, mask: cp.ndarray):
-        return self._weighted_center_inner(mask)
+        return self._weighted_center_inner(
+            mask, self._w_ys, self._w_xs, self._w_weights, self._w_wm
+        )
 
     def _vote_connected(self, mask: cp.ndarray):
         from cupyx.scipy.ndimage import label  # lazy import; only loaded if scheme used
@@ -267,82 +311,43 @@ class HSVCrosshairDetector:
             return None
         return float(ys.mean()), float(xs.mean())
 
+    def _row_suppress(self, mask: cp.ndarray) -> cp.ndarray:
+        """Fused row-suppression: returns mask AND NOT (row_sum[y] > ratio * col_sum[x]).
+        Reductions stay native (CUB-backed); the broadcast-compare + AND fuses into
+        one custom kernel — see _ROW_SUPPRESS_KERNEL for rationale."""
+        H, W = mask.shape
+        mask_u8 = mask.view(cp.uint8)  # bool and uint8 share memory layout
+        row_sum = mask_u8.sum(axis=1, dtype=cp.int64)  # (H,)
+        col_sum = mask_u8.sum(axis=0, dtype=cp.int64)  # (W,)
+        out = cp.empty_like(mask_u8)
+        n = H * W
+        threads = 256
+        blocks = (n + threads - 1) // threads
+        _ROW_SUPPRESS_KERNEL(
+            (blocks,), (threads,),
+            (mask_u8, row_sum, col_sum, out,
+             np.int32(H), np.int32(W), np.float32(_HS_RATIO_THRESHOLD)),
+        )
+        return out.view(cp.bool_)
+
     def _vote_heuristic_spam(self, mask: cp.ndarray):
-        """Multi-stage pipeline: row-suppress -> opening -> avgpool density ->
-        top-K argmax -> scatter check -> small-dot ROI centroid OR multi-element
-        weighted_center fallback. See src/tests/fart_avgpool.py for the visual
-        prototype each stage was tuned in."""
-        H, W = self.roi_h, self.roi_w
-
-        # row-suppression (kill horizontal stripes e.g. red nametags) on raw mask
-        # before opening so opening doesn't dilate nametag remnants back.
-        mask_u8 = mask.astype(cp.uint8)
-        row_sum = mask_u8.sum(axis=1, keepdims=True)              # (H, 1)
-        col_sum = mask_u8.sum(axis=0, keepdims=True)              # (1, W)
-        suppress = row_sum > _HS_RATIO_THRESHOLD * col_sum        # (H, W) via broadcast
-        mask_filtered = mask & ~suppress                          # (H, W) bool
-
-        # opening + density via torch on a dlpack-bridged float32 view of the mask.
+        """row-suppress -> opening -> density -> weighted_center on density (coarse).
+        Density downsampling smooths small FPs into near-zero contribution. Coordinates
+        come back in density-grid space; multiply by the stride to map to ROI pixels."""
+        mask_filtered = self._row_suppress(mask)
         mask_f32 = mask_filtered.astype(cp.float32)
         mask_t = torch.from_dlpack(mask_f32)[None, None, ...]
         with torch.no_grad():
-            opened = self._opening(mask_t)                         # (1,1,H,W) {0,1}
-            pooled = self._density(opened)[0, 0]                   # (Hp, Wp)
-
-        Hp, Wp = pooled.shape
-        stride_y = H / Hp
-        stride_x = W / Wp
-        roi_half = _HS_SMALL_ROI_HW // 2
-
-        # top-K argmax positions in pooled grid.
-        flat = pooled.flatten()
-        K = min(_HS_TOP_K, flat.numel())
-        vals, idxs = flat.topk(K)
-        ys_top = (idxs // Wp).float()
-        xs_top = (idxs % Wp).float()
-        top1_val = float(vals[0])
-        if top1_val <= 0.0:
+            opened = self._opening(mask_t)
+            pooled = self._density(opened)
+        pooled_cp = cp.from_dlpack(pooled.detach())[0, 0]
+        pt = self._weighted_center_inner(
+            pooled_cp, self._hs_ys, self._hs_xs, self._hs_weights, self._hs_wm
+        )
+        if pt is None:
             return None
-
-        # mean sqrt-of-L2 dist (input-pixel units) of valid top-K from their centroid.
-        # sqrt compresses outliers — a couple of far-away patches don't dominate.
-        valid = vals > 0
-        n_valid = int(valid.sum().item())
-        if n_valid > 1:
-            valid_ys = ys_top[valid]
-            valid_xs = xs_top[valid]
-            cy_topk = valid_ys.mean()
-            cx_topk = valid_xs.mean()
-            dy = (valid_ys - cy_topk) * stride_y
-            dx = (valid_xs - cx_topk) * stride_x
-            l2 = torch.sqrt(dy * dy + dx * dx)
-            mean_dist = float(torch.sqrt(l2).mean())
-        else:
-            mean_dist = 0.0
-
-        if mean_dist <= _HS_SCATTER_THRESHOLD:
-            # SMALL-DOT MODE: argmax patch + ROI centroid on opened mask. argmax was
-            # computed over density(opened) so opened in the patch's RF is non-empty
-            # by construction whenever top1_val > 0.
-            py0 = int(ys_top[0].item())
-            px0 = int(xs_top[0].item())
-            cy_op = py0 * stride_y                                # corner-aligned
-            cx_op = px0 * stride_x
-            y_lo = max(0, int(cy_op - roi_half))
-            y_hi = min(H, int(cy_op + roi_half))
-            x_lo = max(0, int(cx_op - roi_half))
-            x_hi = min(W, int(cx_op + roi_half))
-            opened_cp = cp.from_dlpack(opened.detach())[0, 0]
-            roi_mask = opened_cp[y_lo:y_hi, x_lo:x_hi] > 0
-            cys, cxs = cp.where(roi_mask)
-            if cys.size == 0:
-                return cy_op, cx_op  # fallback to patch center (shouldn't normally hit)
-            return float(cys.mean()) + y_lo, float(cxs.mean()) + x_lo
-
-        # MULTI-ELEMENT MODE: weighted_center on the opened mask. shares buffers
-        # with _vote_weighted_center via _weighted_center_inner.
-        opened_cp = cp.from_dlpack(opened.detach())[0, 0]
-        return self._weighted_center_inner(opened_cp)
+        cy_d, cx_d = pt
+        return cy_d * self._hs_stride_y, cx_d * self._hs_stride_x
 
     # --- public entry point ---------------------------------------------------
 

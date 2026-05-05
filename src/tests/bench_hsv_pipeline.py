@@ -190,13 +190,161 @@ def bench(name, frame, n_warmup=50, n_iter=500):
     print(f"{name:8s} | mode={mode:6s} | mean={mean_ms:6.3f} ms | std={std_ms:5.3f} ms | fps={fps:7.1f}")
 
 
+# ---- per-stage breakdown ---------------------------------------------------
+
+def bench_stage(label, fn, n_warmup=50, n_iter=500):
+    """Time a single callable with sync barriers around each call."""
+    for _ in range(n_warmup):
+        fn()
+    cp.cuda.runtime.deviceSynchronize()
+
+    times_ns = np.empty(n_iter, dtype=np.int64)
+    for i in range(n_iter):
+        cp.cuda.runtime.deviceSynchronize()
+        t0 = time.perf_counter_ns()
+        fn()
+        cp.cuda.runtime.deviceSynchronize()
+        t1 = time.perf_counter_ns()
+        times_ns[i] = t1 - t0
+    arr = times_ns / 1e6
+    print(f"  {label:32s} mean={arr.mean():6.3f} ms  std={arr.std():5.3f} ms")
+
+
+def stage_breakdown(name: str, frame: cp.ndarray):
+    """Bench each stage of the pipeline individually using inputs precomputed
+    from a single forward pass. Sync barriers force per-stage timings, so the sum
+    of stages will exceed the end-to-end mean (no overlap)."""
+    print(f"\n[per-stage on '{name}']")
+
+    # Stage 1: HSV mask
+    bench_stage(
+        "1. cupy_red_mask",
+        lambda: cupy_red_mask(
+            frame[cp.newaxis, ...],
+            color_center=_HSV_COLOR_CENTER, color_range=_HSV_COLOR_RANGE,
+            s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
+            v_min=_HSV_V_MIN, v_max=_HSV_V_MAX,
+        ),
+    )
+
+    # Precompute mask for downstream stages
+    cp_mask = cupy_red_mask(
+        frame[cp.newaxis, ...],
+        color_center=_HSV_COLOR_CENTER, color_range=_HSV_COLOR_RANGE,
+        s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
+        v_min=_HSV_V_MIN, v_max=_HSV_V_MAX,
+    )[0, ...]
+
+    # Stage 2: row-suppression
+    def stage_rowsup():
+        mask_u8 = cp_mask.astype(cp.uint8)
+        row_sum = mask_u8.sum(axis=1, keepdims=True)
+        col_sum = mask_u8.sum(axis=0, keepdims=True)
+        suppress = row_sum > RATIO_THRESHOLD * col_sum
+        return cp_mask & ~suppress
+    bench_stage("2. row-suppression", stage_rowsup)
+
+    cp_mask_filtered = stage_rowsup()
+    mask_f32_static = cp_mask_filtered.astype(cp.float32)
+    mask_t_static = torch.from_dlpack(mask_f32_static)[None, None, ...]
+
+    # Stage 3: opening (torch)
+    def stage_opening():
+        with torch.no_grad():
+            return opening(mask_t_static)
+    bench_stage("3. opening (torch)", stage_opening)
+
+    opened_static = stage_opening()
+
+    # Stage 4: density (torch)
+    def stage_density():
+        with torch.no_grad():
+            return density(opened_static)[0, 0]
+    bench_stage("4. density (torch)", stage_density)
+
+    pooled_static = stage_density()
+    Hp, Wp = pooled_static.shape
+
+    # Stage 5: top-K extraction
+    def stage_topk():
+        flat = pooled_static.flatten()
+        K = min(TOP_K, flat.numel())
+        vals, idxs = flat.topk(K)
+        ys_top = (idxs // Wp).float()
+        xs_top = (idxs % Wp).float()
+        return vals, ys_top, xs_top
+    bench_stage("5. top-K extraction", stage_topk)
+
+    vals_static, ys_top_static, xs_top_static = stage_topk()
+    stride_y = _H / Hp
+    stride_x = _W / Wp
+
+    # Stage 6: scatter calculation (incl. sync via .item() on n_valid)
+    def stage_scatter():
+        valid = vals_static > 0
+        n_valid = int(valid.sum().item())
+        if n_valid > 1:
+            valid_ys = ys_top_static[valid]
+            valid_xs = xs_top_static[valid]
+            cy_topk = valid_ys.mean()
+            cx_topk = valid_xs.mean()
+            dy = (valid_ys - cy_topk) * stride_y
+            dx = (valid_xs - cx_topk) * stride_x
+            l2 = torch.sqrt(dy * dy + dx * dx)
+            return float(torch.sqrt(l2).mean())
+        return 0.0
+    bench_stage("6. scatter calc (+ topk sync)", stage_scatter)
+
+    # Stage 7: small-dot ROI centroid (only meaningful when there's red)
+    if float(vals_static[0]) > 0:
+        roi_half = SMALL_ROI_HW // 2
+        py0 = int(ys_top_static[0].item())
+        px0 = int(xs_top_static[0].item())
+        cy_op = py0 * stride_y
+        cx_op = px0 * stride_x
+        y_lo = max(0, int(cy_op - roi_half))
+        y_hi = min(_H, int(cy_op + roi_half))
+        x_lo = max(0, int(cx_op - roi_half))
+        x_hi = min(_W, int(cx_op + roi_half))
+
+        def stage_smalldot():
+            opened_cp = cp.from_dlpack(opened_static.detach())[0, 0]
+            roi_mask = opened_cp[y_lo:y_hi, x_lo:x_hi] > 0
+            cys, cxs = cp.where(roi_mask)
+            if cys.size > 0:
+                return float(cys.mean()) + y_lo, float(cxs.mean()) + x_lo
+            return cy_op, cx_op
+        bench_stage("7. small-dot ROI centroid", stage_smalldot)
+
+        # Stage 8: multi-element weighted_center
+        def stage_multi():
+            opened_cp = cp.from_dlpack(opened_static.detach())[0, 0]
+            cp.multiply(wc_weights, opened_cp, out=wc_wm)
+            total = float(wc_wm.sum())
+            if total > 0:
+                cy = float((wc_wm * _ys).sum()) / total
+                cx = float((wc_wm * _xs).sum()) / total
+                return cy, cx
+            return None
+        bench_stage("8. multi-elem weighted_center", stage_multi)
+
+
 def main():
     print(f"capture={_H}x{_W}, top_k={TOP_K}, scatter_thresh={SCATTER_THRESHOLD}, "
           f"small_roi={SMALL_ROI_HW}, ratio_thresh={RATIO_THRESHOLD}")
     print("-" * 80)
+    print("[end-to-end]")
     bench("empty", make_empty())
     bench("dot",   make_dot())
     bench("ring",  make_ring())
+
+    # per-stage breakdown on dot (small-dot mode) and ring (multi-elem mode)
+    print()
+    print("=" * 80)
+    print("per-stage breakdown (sync per stage; sum > end-to-end mean by design)")
+    print("=" * 80)
+    stage_breakdown("dot",  make_dot())
+    stage_breakdown("ring", make_ring())
 
 
 if __name__ == "__main__":
