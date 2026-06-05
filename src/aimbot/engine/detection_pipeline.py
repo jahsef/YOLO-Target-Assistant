@@ -59,7 +59,7 @@ class DetectionPipeline:
             )
 
         self.union_nms_iou = float(m['union_nms_iou'])
-
+          
         # precision_sr hysteresis: # of stale-lock frames we tolerate before bailing
         # back to the scan path. 0 = no hysteresis (legacy behavior).
         self.precision_sr_hysteresis_frames = int(m['precision_sr_hysteresis_frames'])

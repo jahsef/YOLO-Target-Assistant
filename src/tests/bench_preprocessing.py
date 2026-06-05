@@ -18,10 +18,8 @@ import torch
 
 
 WARMUP        = 200
-N_SAMPLES     = 512     # number of independent sprints
-N_FRAMES      = 64      # iterations per sprint (GPU)
-CPU_FRACTION  = 1.0     # CPU sprint length = CPU_FRACTION * N_FRAMES
-BATCH_SIZE    = 4       # batch size for batched section
+N_FRAMES      = 512     # frames timed per benchmark
+BATCH_SIZE    = 16       # batch size for batched section
 SIZES         = [(640, 640)]
 
 
@@ -35,24 +33,25 @@ def make_fake_frame_cupy(h, w):
     a = make_fake_frame_torchgpu(h,w)
     return cp.asarray(a)
 
-def timer(fn, warmup, n_samples, iters, gpu_sync=True):
+def timer(fn, warmup, n_frames, gpu_sync=True):
     for _ in range(warmup):
         fn()
     if gpu_sync:
         torch.cuda.synchronize()
 
-    sprint_means = np.empty(n_samples)
-    for s in range(n_samples):
-        t0 = time.perf_counter()
-        for _ in range(iters):
-            fn()
+    samples = np.empty(n_frames)
+    for i in range(n_frames):
         if gpu_sync:
             torch.cuda.synchronize()
-        sprint_means[s] = (time.perf_counter() - t0) / iters * 1e6
+        t0 = time.perf_counter()
+        fn()
+        if gpu_sync:
+            torch.cuda.synchronize()
+        samples[i] = (time.perf_counter() - t0) * 1e6
 
-    mean = sprint_means.mean()
-    std  = sprint_means.std(ddof=1)
-    ci95 = 1.96 * std / np.sqrt(n_samples)
+    mean = samples.mean()
+    std  = samples.std(ddof=1)
+    ci95 = 1.96 * std / np.sqrt(n_frames)
     return mean, std, ci95
 
 
@@ -217,8 +216,49 @@ def cupy_nobgr5(frame_cp:cp.array, device):
     return frame_cp
 
 
-def bench(label, fn, iters, n_samples, gpu_sync, baseline_mean=None):
-    mean, std, ci95 = timer(fn, WARMUP, n_samples, iters, gpu_sync)
+# ── fused CuPy kernel: HWC uint8 -> NCHW float32 / 255 in a single pass ──────
+# (matches model.py:_preprocess_cp output; no BGR->RGB flip)
+_PREPROCESS_KERNEL = cp.RawKernel(r"""
+extern "C" __global__
+void hwc_u8_to_nchw_f32_div255(const unsigned char* __restrict__ src,
+                                float* __restrict__ dst,
+                                const int H, const int W) {
+    // dst layout: (1, 3, H, W) contiguous -> dst[c*H*W + y*W + x]
+    // src layout: (H, W, 3)    contiguous -> src[y*W*3 + x*3 + c]
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int c = blockIdx.z;  // 0,1,2
+    if (x >= W || y >= H) return;
+
+    unsigned char v = src[(y * W + x) * 3 + c];
+    dst[c * H * W + y * W + x] = (float)v * (1.0f / 255.0f);
+}
+""", "hwc_u8_to_nchw_f32_div255")
+
+
+def fused_preprocess(frame: cp.ndarray, device=None) -> cp.ndarray:
+    """frame: (H, W, 3) cp.uint8. Returns (1, 3, H, W) cp.float32. Single kernel pass."""
+    H, W, _ = frame.shape
+    src = cp.ascontiguousarray(frame)  # no-op if already contiguous
+    out = cp.empty((1, 3, H, W), dtype=cp.float32)
+    block = (32, 8, 1)
+    grid = ((W + block[0] - 1) // block[0],
+            (H + block[1] - 1) // block[1],
+            3)
+    _PREPROCESS_KERNEL(grid, block, (src, out, np.int32(H), np.int32(W)))
+    return out
+
+
+def cupy_pipeline_preprocess(frame: cp.ndarray, device=None) -> cp.ndarray:
+    """Stock CuPy path (matches model.py:_preprocess_cp): transpose/cast/div, three kernels."""
+    frame = frame.transpose(2, 0, 1)[cp.newaxis, ...]
+    frame = cp.ascontiguousarray(frame, dtype=cp.float32)
+    cp.true_divide(frame, 255.0, out=frame, dtype=cp.float32)
+    return frame
+
+
+def bench(label, fn, n_frames, gpu_sync, baseline_mean=None):
+    mean, std, ci95 = timer(fn, WARMUP, n_frames, gpu_sync)
     speedup = f"  {baseline_mean/mean:.2f}x" if baseline_mean is not None else ""
     print(f"  {label:<34}: {mean:7.2f} ±{std:6.2f} µs  CI95=[{mean-ci95:.2f}, {mean+ci95:.2f}]{speedup}")
     return mean
@@ -226,7 +266,6 @@ def bench(label, fn, iters, n_samples, gpu_sync, baseline_mean=None):
 
 def run(h, w, device):
     gpu = device.type == "cuda"
-    iters = N_FRAMES if gpu else max(1, int(N_FRAMES * CPU_FRACTION))
     frame_np = make_fake_frame_np(h, w)
     frame_torchgpu = make_fake_frame_torchgpu(h, w)
     frame_cp = make_fake_frame_cupy(h, w)
@@ -237,34 +276,36 @@ def run(h, w, device):
 
     # ── single frame ──────────────────────────────────────────────────────────
     print(f"\n{'='*72}")
-    print(f"  {h}x{w}  |  {device}  |  batch=1  |  warmup={WARMUP}  samples={N_SAMPLES}  iters/sample={iters}")
+    print(f"  {h}x{w}  |  {device}  |  batch=1  |  warmup={WARMUP}  frames={N_FRAMES}")
     print(f"{'='*72}")
-    
-    ult = bench("Ultralytics",                          lambda: ultralytics_preprocess([frame_np], device),  iters, N_SAMPLES, gpu)
-    bench("ultralytics_preprocess2 (tensor ops change)",       lambda: ultralytics_preprocess2([frame_np], device), iters, N_SAMPLES, gpu, ult)
-    # bench("ultralytics_preprocess3 (added single frame case)",       lambda: ultralytics_preprocess3([frame_np], device),     iters, N_SAMPLES, gpu, ult)
-    bench("ultralytics_preprocess4 (added single frame case)",       lambda: ultralytics_preprocess4([frame_np], device), iters, N_SAMPLES, gpu, ult)
-    # bench("torch_pr_nonblock_preprocess (doesnt handle all cases)",       lambda: torch_pr_nonblock_preprocess(frame_np, device),     iters, N_SAMPLES, gpu, ult)
-    # bench("torch_pr_nonblock_preprocess2",       lambda: torch_pr_nonblock_preprocess2(frame_np, device),     iters, N_SAMPLES, gpu, ult)
-    # bench("torch_pr_nonblock_view",       lambda: torch_pr_nonblock_view(frame_np, device),     iters, N_SAMPLES, gpu, ult)
-    # bench("torch_pr_nonblock_view2",       lambda: torch_pr_nonblock_view2(frame_np, device),     iters, N_SAMPLES, gpu, ult)
-    # bench("torch_pr_nonblock_view3",       lambda: torch_pr_nonblock_view3(frame_np, device),     iters, N_SAMPLES, gpu, ult)
-    # if gpu:
-    #     bench("cupy_nobgr5",                            lambda: cupy_nobgr5(frame_cp, device),               iters, N_SAMPLES, gpu, ult)
+
+    ult = bench("Ultralytics",                          lambda: ultralytics_preprocess([frame_np], device),  N_FRAMES, gpu)
+    bench("ultralytics_preprocess2 (tensor ops change)",       lambda: ultralytics_preprocess2([frame_np], device), N_FRAMES, gpu, ult)
+    # bench("ultralytics_preprocess3 (added single frame case)",       lambda: ultralytics_preprocess3([frame_np], device),     N_FRAMES, gpu, ult)
+    bench("ultralytics_preprocess4 (added single frame case)",       lambda: ultralytics_preprocess4([frame_np], device), N_FRAMES, gpu, ult)
+    bench("torch_pr_nonblock_preprocess (doesnt handle all cases)",       lambda: torch_pr_nonblock_preprocess(frame_np, device),     N_FRAMES, gpu, ult)
+    bench("torch_pr_nonblock_preprocess2",       lambda: torch_pr_nonblock_preprocess2(frame_np, device),     N_FRAMES, gpu, ult)
+    bench("torch_pr_nonblock_view",       lambda: torch_pr_nonblock_view(frame_np, device),     N_FRAMES, gpu, ult)
+    bench("torch_pr_nonblock_view2",       lambda: torch_pr_nonblock_view2(frame_np, device),     N_FRAMES, gpu, ult)
+    bench("torch_pr_nonblock_view3",       lambda: torch_pr_nonblock_view3(frame_np, device),     N_FRAMES, gpu, ult)
+    if gpu:
+        bench("cupy_nobgr5",                            lambda: cupy_nobgr5(frame_cp, device),               N_FRAMES, gpu, ult)
+        bench("cupy_pipeline (transpose/cast/div)",     lambda: cupy_pipeline_preprocess(frame_cp),          N_FRAMES, gpu, ult)
+        bench("fused RawKernel (HWC->NCHW/255)",         lambda: fused_preprocess(frame_cp),                  N_FRAMES, gpu, ult)
 
     # ── batched ───────────────────────────────────────────────────────────────
     print(f"\n{'='*72}")
-    print(f"  {h}x{w}  |  {device}  |  batch={BATCH_SIZE}  |  warmup={WARMUP}  samples={N_SAMPLES}  iters/sample={iters}")
+    print(f"  {h}x{w}  |  {device}  |  batch={BATCH_SIZE}  |  warmup={WARMUP}  frames={N_FRAMES}")
     print(f"{'='*72}")
 
-    ult_b = bench("Ultralytics",                        lambda: ultralytics_preprocess(batch_np, device),    iters, N_SAMPLES, gpu)
-    bench("ultralytics_preprocess2 (tensor ops change)",       lambda: ultralytics_preprocess2(batch_np, device),   iters, N_SAMPLES, gpu, ult_b)
-    bench("ultralytics_preprocess4 (added single frame case)",       lambda: ultralytics_preprocess4(batch_np, device),   iters, N_SAMPLES, gpu, ult_b)
+    ult_b = bench("Ultralytics",                        lambda: ultralytics_preprocess(batch_np, device),    N_FRAMES, gpu)
+    bench("ultralytics_preprocess2 (tensor ops change)",       lambda: ultralytics_preprocess2(batch_np, device),   N_FRAMES, gpu, ult_b)
+    bench("ultralytics_preprocess4 (added single frame case)",       lambda: ultralytics_preprocess4(batch_np, device),   N_FRAMES, gpu, ult_b)
     
 if __name__ == "__main__":
     print("Preprocessing benchmark")
     print(f"CUDA: {torch.cuda.get_device_name(0)}")
     for h, w in SIZES:
         run(h, w, torch.device("cuda"))
-    for h, w in SIZES:
-        run(h, w, torch.device("cpu"))
+    # for h, w in SIZES:
+    #     run(h, w, torch.device("cpu"))

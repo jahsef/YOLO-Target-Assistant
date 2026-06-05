@@ -143,15 +143,15 @@ class TargetSelector:
             ):
         # Tuning constants
         #for lead (momentum based leading)
-        self.MOVEMENT_BUFFER_LENGTH = 60
+        self.MOVEMENT_BUFFER_LENGTH = 64
         self.WMA_VELOCITY_THRESHOLD = 72 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
         self.BASE_LEAD_SENS = 0.24
-        self.LEAD_AGE_WARMUP_FRAMES = 24 # linear warmup: 0 lead at age 0, full lead at this age
+        self.LEAD_AGE_WARMUP_FRAMES = 12 # linear warmup: 0 lead at age 0, full lead at this age
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
         self.LEAD_Y_SCALE = 1.0#may want to lessen y momentum sometimes tbh
         self.LEAD_SENS_EMA_ALPHA = 0.10 # EMA smoothing for lead_sensitivity (lower = smoother)
-        self.rsi_dampener = RSIDampener(periods=(32, 128, 512), k=16) #higher k = less dampening. lower k = higher dampening, can adversely put sens low at all times rather than damping effectively
+        self.rsi_dampener = RSIDampener(periods=(32, 128, 512), k=12) #higher k = less dampening. lower k = higher dampening, can adversely put sens low at all times rather than damping effectively
         self._lead_sens_ema = self.BASE_LEAD_SENS
         
         # Physics and targeting constants
@@ -159,7 +159,7 @@ class TargetSelector:
         self.GRAVITY = 128  # Roblox default studs/s^2
         self.TARGET_REAL_HEIGHT = 5
         self.TARGET_REAL_WIDTH = 3.5
-        self.DISTANCE_CALIBRATION_FACTOR = 0.42
+        self.DISTANCE_CALIBRATION_FACTOR = 0.35
         
         
 
@@ -470,17 +470,17 @@ class TargetSelector:
             screen_drop = self._convert_to_screen_drop(real_drop,predicted_dist)
             aim_y -= screen_drop
             log(f'screen_drop: {screen_drop}', "DEBUG")
-            #if leading target is on then predicting drop is almost definitely on 
+            #if leading target is on then predicting drop is almost definitely on
             if self.cfg['targeting_settings']['lead_target']:
                 #lead target function handles all the sensitivity lead scaling etc
                 unscaled_deltas = self._get_deltas((aim_x, aim_y), crosshair_xy=crosshair)
                 target_id = highest_prio_enemy_detection[4]
                 track_age = int(highest_prio_enemy_detection[9] - highest_prio_enemy_detection[8]) # last_frame - start_frame
                 lead_pixels_x, lead_pixels_y = self.lead_target(predicted_bullet_travel_time=predicted_bullet_travel_time, unscaled_deltas=unscaled_deltas, target_id=target_id, track_age=track_age)
-        
+
                 aim_x += lead_pixels_x#sort of acts like a momentum factor while also leading shots
                 aim_y += lead_pixels_y
-                
+
             log(f'\npredicted dist: {predicted_dist}', "DEBUG")
             log(f'predicted bullet travel time: {predicted_bullet_travel_time}', "DEBUG")
             log(f'predicted screen drop:{screen_drop}', "DEBUG")

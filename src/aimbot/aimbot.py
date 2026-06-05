@@ -1,4 +1,4 @@
-from BetterBYTETracker.trackers.byte_tracker import BYTETracker
+
 import time
 import torch
 import sys
@@ -7,6 +7,9 @@ from ultralytics.utils.ops import xyxy2xywh
 import numpy as np
 import cupy as cp
 import json
+
+
+
 
 # can replace with bettercam just no cupy support, when init camera object set nvidia_gpu = False for bettercam
 import betterercam
@@ -72,6 +75,7 @@ class Aimbot:
         """
         Validates targeting configuration settings.
         Raises ValueError if configuration is invalid.
+        may want to consider moving alot of this stuff to the initialization of other modules (other modules responsible for checking their own issues?)
         """
         ts = self.cfg['targeting_settings']
         lead_target = ts['lead_target']
@@ -97,6 +101,7 @@ class Aimbot:
                 raise ValueError(
                     f"Invalid 'hsv_settings.voting_scheme': {scheme!r}. Must be one of {list(HSVCrosshairDetector.VOTING_SCHEMES)}."
                 )
+
 
     def init_monitor(self):
         #dynamic monitor settings
@@ -166,10 +171,19 @@ class Aimbot:
                     locked=self.target_selector._prev_detection,
                     locked_lifetime=self.target_selector._prev_detection_lifetime,
                 )
+                crosshair_rows = None
+                if self.bypass_crosshair_tracker:
+                    # pull hsv crosshair rows out of (M,6) so they skip the tracker
+                    crosshair_mask = results[:, 5] == self.crosshair_cls_id
+                    crosshair_rows = results[crosshair_mask]
+                    results = results[~crosshair_mask]
+
                 results[:,0:4] = xyxy2xywh(results[:,0:4])
                 self.tracker.update(results) # expects (N, 6) [x, y, w, h, conf, cls]
                 self.tracker.multi_predict(tracks = None) # ultralytics expects stracks, our custom impl uses internal state (tracks arg unused)
                 tracked_detections = self.tracker.get_active_tracks_with_lifetime() # returns (M, 10) [x1,y1,x2,y2,track_id,score,cls,idx,start_frame,last_frame]
+                if crosshair_rows is not None and len(crosshair_rows) > 0:
+                    tracked_detections = np.concatenate([tracked_detections, self._crosshair_to_tracked(crosshair_rows)], axis=0)
                 # refresh routing state every frame from the freshest tracker output, independent of
                 # whether aimbot is firing. without this, precision_sr can get stuck if the small target
                 # is lost or replaced — see TargetSelector.update_prev_detection for the full reason.
@@ -216,6 +230,10 @@ class Aimbot:
             sys.exit(1)
 
     def setup_bytetracker(self):
+        # hsv crosshair rows skip the tracker (no track latency on the reticle) and get
+        # injected straight into the tracked output; enemies still go through bytetracker.
+        self.bypass_crosshair_tracker = self.cfg['targeting_settings']['hsv_settings']['bypass_tracker']
+        self.crosshair_cls_id = self.cfg['targeting_settings']['crosshair_cls_id']
         #if engine is running just going to assume 144 is the target frame rate
         #if pt model is running its probably debug screen so 30
         target_frame_rate = 144 if self.pipeline.base_model.model_ext == ".engine" else 30
@@ -227,8 +245,40 @@ class Aimbot:
             match_thresh=0.6,
             new_track_thresh=0.65
         )
+            
+        tracker_impl = self.cfg['tracker_settings']['tracker_impl']
+        allowed_impls = ['ultralytics', 'ultralytics_vectorized', 'cpp']
+        assert tracker_impl in allowed_impls, f"expected tracker_settings.tracker_impl to be in {allowed_impls}, got {tracker_impl}"
 
-        self.tracker = BYTETracker(args, frame_rate=target_frame_rate)
+        if tracker_impl == "ultralytics":
+            from ultralytics.trackers.byte_tracker import BYTETracker
+        elif tracker_impl == "ultralytics_vectorized":
+            from c_bytetracker.trackers.byte_tracker import BYTETracker
+        elif tracker_impl == "cpp":
+            from c_bytetracker.cpp_tracker import CppBYTETracker as BYTETracker
+
+        tracker = BYTETracker(args, frame_rate=target_frame_rate)
+        # stock ultralytics returns (M,8) with no lifetime cols and wants a results object,
+        # not a raw (N,6) array — wrap it to match the loop's contract. vectorized/cpp are native.
+        if tracker_impl == "ultralytics":
+            from .engine.tracker_adapter import UltralyticsAdapter
+            tracker = UltralyticsAdapter(tracker)
+        self.tracker = tracker
+
+    def _crosshair_to_tracked(self, crosshair_rows: np.ndarray) -> np.ndarray:
+        """(K,6) [x1,y1,x2,y2,conf,cls] -> (K,10) tracked-format rows for untracked
+        hsv crosshair dets. track_id/idx/start_frame/last_frame are placeholders (-1/0);
+        _get_crosshair only reads the xyxy box + cls."""
+        k = len(crosshair_rows)
+        out = np.empty((k, 10), dtype=np.float32)
+        out[:, 0:4] = crosshair_rows[:, 0:4]   # xyxy
+        out[:, 4] = -1                         # track_id (untracked)
+        out[:, 5] = crosshair_rows[:, 4]       # score
+        out[:, 6] = crosshair_rows[:, 5]       # cls
+        out[:, 7] = -1                         # idx
+        out[:, 8] = 0                          # start_frame
+        out[:, 9] = 0                          # last_frame
+        return out
 
     def aimbot(self, detections: np.ndarray):
         """

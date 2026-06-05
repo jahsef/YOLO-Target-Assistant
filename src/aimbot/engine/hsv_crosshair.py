@@ -85,12 +85,12 @@ def cupy_red_mask(rgb_gpu: cp.ndarray, color_center: int, color_range: int,
 
 # Hardcoded HSV thresholds tuned empirically for this game's red crosshair
 # via src/hsv_testing/fart.py visual sweep.
-_HSV_COLOR_CENTER = 6
-_HSV_COLOR_RANGE = 12
-_HSV_S_MIN = 170
+_HSV_COLOR_CENTER = 0
+_HSV_COLOR_RANGE = 10
+_HSV_S_MIN = 160
 _HSV_S_MAX = 255
-_HSV_V_MIN = 150
-_HSV_V_MAX = 245
+_HSV_V_MIN = 140
+_HSV_V_MAX = 255
 _HSV_BOX_SIZE = 64  # synthetic detection box side, in base-region pixels
 # 64x64 gives better iou for jittering crosshair detections so better tracker stickiness.
 
