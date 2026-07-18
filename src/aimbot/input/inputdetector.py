@@ -1,6 +1,4 @@
 from pynput import mouse, keyboard
-from pynput.mouse import Button
-import threading
 from ..utils.utils import log
 
 class InputDetector:
@@ -31,20 +29,12 @@ class InputDetector:
                     log(f'Aimbot Toggled: {self.is_toggled}', "DEBUG")
 
     def start_input_detection(self):
-        """Start the mouse and keyboard listeners in daemon threads (non-blocking)."""
-        mouse_listener = mouse.Listener(on_click=self.on_click)
-        mouse_listener_thread = threading.Thread(
-            target=mouse_listener.start, 
-            daemon=True
-        )
-        mouse_listener_thread.start()
+        """Start the pynput listeners (non-blocking; each Listener runs in its own daemon thread)."""
+        self._mouse_listener = mouse.Listener(on_click=self.on_click)
+        self._mouse_listener.start()
         log("Mouse input listener started in background", "INFO")
 
         if self.toggle_hotkey:
-            keyboard_listener = keyboard.Listener(on_press=self.on_press)
-            keyboard_listener_thread = threading.Thread(
-                target=keyboard_listener.start,
-                daemon=True
-            )
-            keyboard_listener_thread.start()
+            self._keyboard_listener = keyboard.Listener(on_press=self.on_press)
+            self._keyboard_listener.start()
             log(f"Keyboard input listener for hotkey '{self.toggle_hotkey}' started in background", "INFO")

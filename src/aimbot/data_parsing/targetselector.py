@@ -113,9 +113,9 @@ class TargetSelector:
           The actual aimbot math. Re-picks the highest-priority enemy, applies head
           offset, predicts bullet drop, optionally adds momentum lead from the movement
           buffer, and returns mouse deltas to crosshair.
-      - update_movement_buffer(scaled_deltas):
-          Feeds the post-humanizer mouse delta into the RingBuffer used by lead_target
-          for WMA velocity / RSI dampening. Call once per frame after move_mouse_humanized.
+      - update_movement_buffer(raw_deltas):
+          Feeds the raw (pre-sensitivity) aim delta into the RingBuffer used by
+          lead_target for WMA velocity / RSI dampening. Call once per frame.
       - update_zoom_interpolation() / reset_zoom():
           Cubic ease-in zoom state machine. Tick the former while RMB held, call the
           latter on release. Affects FOV in distance/drop math.
@@ -160,6 +160,7 @@ class TargetSelector:
         self.TARGET_REAL_HEIGHT = 5
         self.TARGET_REAL_WIDTH = 3.5
         self.DISTANCE_CALIBRATION_FACTOR = 0.35
+        self.MIN_DISTANCE = 1.0  # studs; floor so degenerate boxes can't NaN the drop math
         
         
 
@@ -191,8 +192,6 @@ class TargetSelector:
         self.buffer = RingBuffer2D(self.MOVEMENT_BUFFER_LENGTH)
         self.weights = np.arange(self.MOVEMENT_BUFFER_LENGTH, 0, -1, dtype=np.float64)  # [n,n-1,...,1]
         self.weights = self.weights / self.weights.sum()  # normalize
-        # self.jitter_relu_breakpoint = 5#5 or greater counts as 'jitter'
-        #1.5 pixels avg jitter /frame pretyty conservative
         self.target_lru = OrderedDict()
         self.last_target_id = None #for target-aware momentum decay
         # last selected enemy detection row (10-col tracker output), or None.
@@ -203,67 +202,50 @@ class TargetSelector:
         self._prev_detection_lifetime = 0  # 0 = updated this frame; N = N frames stale
         
 
-    def update_detection_window_center(self, window_dim):
-        w, h = window_dim
-        self.detection_window_center = (w // 2, h // 2)
-            
-    def _calculate_distance(self, target_height_pixels = None, target_real_height=None,
-                            target_width_pixels= None, target_real_width=None):
+    def _calculate_distance(self, target_height_pixels=None, target_width_pixels=None):
         """
-        Robust distance calculation with perspective-safe head detection and weighted uncertainty.
-        Uses aspect ratio to detect vertical occlusion (legs covered, headglitching) and
-        dynamically favor width measurement when occlusion is likely.
+        Distance from apparent angular size, blending height and width estimates by
+        inverse variance. Aspect ratio detects vertical occlusion (legs covered,
+        headglitching) and down-weights the height estimate accordingly.
         """
-        distances = []
-        variances = []
-
-
-        #eff_vert_fov = self.vfov_rad / self.zoom
-	# supposedly most games use tan fov scaling rather than linear
+        # supposedly most games use tan fov scaling rather than linear
         eff_vert_fov = 2 * np.atan(np.tan(self.vfov_rad / 2) / self.zoom)
-        eff_horiz_fov =  2 * np.atan(np.tan(self.hfov_rad / 2) / self.zoom)
+        eff_horiz_fov = 2 * np.atan(np.tan(self.hfov_rad / 2) / self.zoom)
 
-        # Detect occlusion via aspect ratio
-        # Expected ratio is TARGET_REAL_HEIGHT / TARGET_REAL_WIDTH (~1.43 for 5/3.5)
-        # If observed ratio is lower, target is likely vertically occluded
+        # Expected ratio is TARGET_REAL_HEIGHT / TARGET_REAL_WIDTH (~1.43 for 5/3.5).
+        # Lower observed ratio means the target appears "too wide" (vertically occluded).
         height_penalty = 1.0
         if target_height_pixels and target_width_pixels:
             expected_ratio = self.TARGET_REAL_HEIGHT / self.TARGET_REAL_WIDTH
-            observed_ratio = target_height_pixels / target_width_pixels
-            # ratio_factor < 1 means target appears "too wide" (vertically occluded)
-            ratio_factor = observed_ratio / expected_ratio
-            # Clamp between 0.3 and 1.0 - below 0.3 is extreme occlusion
-            ratio_factor = max(0.3, min(1.0, ratio_factor))
-            # Square it to make the penalty more aggressive for occluded targets
-            height_penalty = ratio_factor ** 2
+            ratio_factor = (target_height_pixels / target_width_pixels) / expected_ratio
+            ratio_factor = max(0.3, min(1.0, ratio_factor))  # below 0.3 is extreme occlusion
+            height_penalty = ratio_factor ** 2  # squared: more aggressive for occluded targets
 
-        # 4. Height-based calculation with uncertainty weighting
+        distances = []
+        variances = []
         if target_height_pixels:
-            if target_real_height is None:
-                target_real_height = self.TARGET_REAL_HEIGHT
             px_per_rad = self.screen_height / eff_vert_fov
             angular_size = target_height_pixels / px_per_rad
-            dist = target_real_height / (2 * math.tan(angular_size / 2))
-            distances.append(dist)
-            # Weight by inverse square of angular size (smaller = less reliable)
-            # Apply occlusion penalty to height variance (higher variance = less trusted)
+            distances.append(self.TARGET_REAL_HEIGHT / (2 * math.tan(angular_size / 2)))
+            # weight by inverse square of angular size (smaller = less reliable);
+            # occlusion penalty lowers the height estimate's trust further
             variances.append(angular_size ** 2 * height_penalty)
 
-        # 5. Width-based calculation (same logic)
         if target_width_pixels:
-            if target_real_width is None:
-                target_real_width = self.TARGET_REAL_WIDTH
             px_per_rad = self.screen_width / eff_horiz_fov
             angular_size = target_width_pixels / px_per_rad
-            dist = target_real_width / (2 * math.tan(angular_size / 2))
-            distances.append(dist)
+            distances.append(self.TARGET_REAL_WIDTH / (2 * math.tan(angular_size / 2)))
             variances.append(angular_size ** 2)
 
-        # 6. Physics-based weighting instead of magic numbers
-        weights = [1/v for v in variances] if len(variances) == 2 else [1]
+        if not distances:
+            # degenerate 0x0 box: nothing measurable. distance 0 would NaN the
+            # drop math downstream (real_drop / distance) — return the floor instead.
+            return self.MIN_DISTANCE
+
+        weights = [1 / v for v in variances] if len(variances) == 2 else [1]
         weighted_distance = sum(d * w for d, w in zip(distances, weights)) / sum(weights)
 
-        return weighted_distance * self.DISTANCE_CALIBRATION_FACTOR
+        return max(self.MIN_DISTANCE, weighted_distance * self.DISTANCE_CALIBRATION_FACTOR)
     
     def _calculate_travel_time(self, delta_x):
         time_of_flight = delta_x / self.projectile_velocity
@@ -286,38 +268,29 @@ class TargetSelector:
     
         
 
-    def _get_closest_detection(self,detections:np.ndarray,reference_point:tuple[int,int]) -> tuple:
-        """
-        returns the closest detection to a given reference point, which is a crosshair or the center of the screen
-        
-        uses L1 dist
-        
-        returns detection, l1_dist
-        """
-        # verified to be xyxy 
-        xyxy_arr = detections[:,:4]
-        #needs to be transposed, this tries to unpack row wise, so x1 would try to get the first row xyxy
-        x1, y1, x2, y2 = xyxy_arr[:, 0:4].T
-        curr_centers_x = (x1 + x2) / 2
-        curr_centers_y = (y1 + y2) / 2
-        dx = curr_centers_x - reference_point[0]
-        dy = curr_centers_y - reference_point[1]
-        sum_deltas = np.abs(dx) + np.abs(dy)
-        min_idx = np.argmin(sum_deltas)
-        return detections[min_idx], sum_deltas[min_idx]
+    @staticmethod
+    def _l1_distances(detections: np.ndarray, point: tuple[float, float]) -> np.ndarray:
+        """(N,) L1 distance from each detection's bbox center to `point`."""
+        # transposed so x1 unpacks a column, not the first row's xyxy
+        x1, y1, x2, y2 = detections[:, 0:4].T
+        dx = (x1 + x2) / 2 - point[0]
+        dy = (y1 + y2) / 2 - point[1]
+        return np.abs(dx) + np.abs(dy)
 
-    def _get_distance_to_crosshair(self,detection, crosshair):    
-        """
-        L1 dist from crosshair
-        """
+    def _get_closest_detection(self,detections:np.ndarray,reference_point:tuple[int,int]) -> tuple:
+        """Closest detection to a reference point (crosshair or window center).
+        Returns (detection, l1_dist)."""
+        dists = self._l1_distances(detections, reference_point)
+        min_idx = np.argmin(dists)
+        return detections[min_idx], dists[min_idx]
+
+    def _get_distance_to_crosshair(self,detection, crosshair):
+        """L1 center distance of a single detection row from the crosshair.
+        Scalar math on purpose — numpy single-row ops bench ~6x slower and this
+        runs every frame inside _get_highest_priority_target."""
         x1, y1, x2, y2 = detection[:4]
-        curr_centers_x = (x1 + x2) / 2
-        curr_centers_y = (y1 + y2) / 2
-        dx = curr_centers_x - crosshair[0]
-        dy = curr_centers_y - crosshair[1]
-        sum_deltas = np.abs(dx) + np.abs(dy)#just use l1 
-        return sum_deltas
-        
+        return abs((x1 + x2) / 2 - crosshair[0]) + abs((y1 + y2) / 2 - crosshair[1])
+
     def _get_highest_priority_target(self, detections, crosshair):
 
         for detection in detections:
@@ -363,10 +336,27 @@ class TargetSelector:
 
         return self.detection_window_center
     
-    def update_movement_buffer(self, scaled_deltas:tuple[int,int]):
-        #okay so currently this is called in aimbot.aimbot() after it gets scaled deltas from mouse movement humanizer thing
-        #i think this is the cleanest solution i hope?
-        self.buffer.push(scaled_deltas[0], scaled_deltas[1])
+    def _select_enemy(self, detections: np.ndarray, prioritize_oldest: bool):
+        """Pick the enemy to act on from full (N, 10) tracker output.
+        Returns (enemy_row, crosshair_xy), or None if no enemy-class rows exist.
+        prioritize_oldest=True -> LRU + 50% hysteresis pick (mutates target_lru,
+        falls back to closest internally); False -> plain closest-to-crosshair."""
+        cls_mask = detections[:, 6] == self.target_cls_id
+        if np.count_nonzero(cls_mask) == 0:
+            return None
+        enemies = detections[cls_mask]
+        crosshair = self._get_crosshair(detections)
+        if prioritize_oldest:
+            pick = self._get_highest_priority_target(enemies, crosshair)
+        else:
+            pick, _ = self._get_closest_detection(enemies, crosshair)
+        return pick, crosshair
+
+    def update_movement_buffer(self, raw_deltas:tuple[int,int]):
+        """Push this frame's raw (pre-sensitivity) aim deltas into the lead buffer.
+        Raw deltas track the target's observed offset from the crosshair — feeding
+        scaled (post-sens) actuation here would understate true target movement."""
+        self.buffer.push(raw_deltas[0], raw_deltas[1])
     
     def reset_zoom(self):
         """resets zoom for when you aren't right clicking anymore"""
@@ -410,23 +400,14 @@ class TargetSelector:
         # On empty / no-enemy frames we INTENTIONALLY retain the previous pick and just
         # tick the lifetime counter. The pipeline reads (_prev_detection, lifetime) and
         # decides whether the stale lock is still in its hysteresis budget for routing.
-        if len(detections) == 0:
-            self._prev_detection_lifetime += 1
-            return
-        cls_mask = detections[:, 6] == self.target_cls_id
-        if np.count_nonzero(cls_mask) == 0:
-            self._prev_detection_lifetime += 1
-            return
-        enemies = detections[cls_mask]
-        crosshair = self._get_crosshair(detections)
-        # always use highest-priority (LRU + hysteresis) regardless of prioritize_oldest cfg —
+        # Always use highest-priority (LRU + hysteresis) regardless of prioritize_oldest cfg —
         # routing only cares about "is there a small enemy worth precision-cropping", not which
-        # specific one we'd aim at. _get_highest_priority_target falls back to closest internally.
-        pick = self._get_highest_priority_target(enemies, crosshair)
-        if pick is None:
+        # specific one we'd aim at.
+        selected = self._select_enemy(detections, prioritize_oldest=True) if len(detections) else None
+        if selected is None:
             self._prev_detection_lifetime += 1
         else:
-            self._prev_detection = pick
+            self._prev_detection = selected[0]
             self._prev_detection_lifetime = 0
 
     def get_deltas(self,detections:np.ndarray):
@@ -435,19 +416,10 @@ class TargetSelector:
 
         [x1, y1, x2, y2, track_id, confidence, class_id, Strack idx, start_frame, last_frame]
         """
-        cls_mask = detections[:,6] == self.target_cls_id
-        if np.count_nonzero(cls_mask) != 0:#checking if any targets exist
-            enemy_strack_results = detections[cls_mask]
-        else:
+        selected = self._select_enemy(detections, self.cfg['targeting_settings']['prioritize_oldest'])
+        if selected is None:
             return (0,0) #no enemies
-
-
-        crosshair = self._get_crosshair(detections)
-        if self.cfg['targeting_settings']['prioritize_oldest']:
-            #if we want to prio oldest detection, else we get closest
-            highest_prio_enemy_detection = self._get_highest_priority_target(enemy_strack_results,crosshair)
-        else:
-            highest_prio_enemy_detection,_ = self._get_closest_detection(enemy_strack_results, crosshair)
+        highest_prio_enemy_detection, crosshair = selected
 
         # NOTE: _prev_detection is NOT updated here. See update_prev_detection() — it's refreshed
         # from the main loop every frame to keep precision/base routing unstuck.
@@ -493,7 +465,7 @@ class TargetSelector:
 
         return deltas
     
-    def lead_target(self, predicted_bullet_travel_time:int, unscaled_deltas:tuple[float,float], target_id:int, track_age:int = 0):
+    def lead_target(self, predicted_bullet_travel_time:float, unscaled_deltas:tuple[float,float], target_id:int, track_age:int = 0):
         """
         Calculates lead offset based on tracked mouse velocity
 
@@ -508,12 +480,11 @@ class TargetSelector:
             self.last_target_id = target_id
 
         arr_buffer = self.buffer.ordered()
-        lead_sensitivity = self.BASE_LEAD_SENS
 
         wma_velocity_x = (arr_buffer[:, 0] * self.weights).sum()
         wma_velocity_y = (arr_buffer[:, 1] * self.weights).sum()
         wma_velocity = (wma_velocity_x**2 + wma_velocity_y**2)**(0.5)
-        # soft gate: linear ramp from 1.0 at half threshold to 0.0 at full threshold, floor 0.33
+        # soft gate: linear ramp from 1.0 at half threshold to 0.0 at full threshold, floor 0.25
         wma_factor = max(0.25, min(1.0, 2.0 * (1.0 - wma_velocity / self.WMA_VELOCITY_THRESHOLD)))
 
         lead_pixels_x = wma_velocity_x * self.fps_tracker.get_fps() * predicted_bullet_travel_time #pixels/frame * frames/s * s => pixels
@@ -525,7 +496,7 @@ class TargetSelector:
         age_factor = min(1.0, track_age / self.LEAD_AGE_WARMUP_FRAMES)
 
         # combine all multipliers
-        raw_lead_sens = lead_sensitivity * wma_factor * rsi_factor * age_factor
+        raw_lead_sens = self.BASE_LEAD_SENS * wma_factor * rsi_factor * age_factor
 
         # EMA smoothing to stabilize lead_sensitivity across frames
         self._lead_sens_ema += self.LEAD_SENS_EMA_ALPHA * (raw_lead_sens - self._lead_sens_ema)
@@ -554,14 +525,15 @@ if __name__ == '__main__':
 
     ts = TargetSelector(cfg=cfg, detection_window_dim=(640, 640), screen_hw=(1440, 2560), fps_tracker=FakeFPS())
 
-    # fake detections: 5 enemies + 1 crosshair, (n, 8) [x1,y1,x2,y2,track_id,conf,cls_id,strack_idx]
+    # fake detections: 5 enemies + 1 crosshair,
+    # (n, 10) [x1,y1,x2,y2,track_id,conf,cls_id,strack_idx,start_frame,last_frame]
     detections = np.array([
-        [100, 200, 130, 260, 1, 0.9, 0, 0],
-        [300, 150, 340, 230, 2, 0.85, 0, 1],
-        [200, 300, 225, 355, 3, 0.7, 0, 2],
-        [400, 100, 430, 170, 4, 0.8, 0, 3],
-        [150, 250, 180, 310, 5, 0.75, 0, 4],
-        [318, 318, 322, 322, 6, 0.95, 2, 5],
+        [100, 200, 130, 260, 1, 0.9, 0, 0, 0, 30],
+        [300, 150, 340, 230, 2, 0.85, 0, 1, 0, 30],
+        [200, 300, 225, 355, 3, 0.7, 0, 2, 10, 30],
+        [400, 100, 430, 170, 4, 0.8, 0, 3, 0, 30],
+        [150, 250, 180, 310, 5, 0.75, 0, 4, 20, 30],
+        [318, 318, 322, 322, 6, 0.95, 2, 5, 0, 30],
     ], dtype=np.float32)
 
     # fill buffer with some movement data

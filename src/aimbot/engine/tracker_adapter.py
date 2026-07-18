@@ -18,6 +18,23 @@ import numpy as np
 from ultralytics.utils.ops import xywh2xyxy
 
 
+def crosshair_rows_to_tracked(crosshair_rows: np.ndarray) -> np.ndarray:
+    """(K, 6) [x1,y1,x2,y2,conf,cls] -> (K, 10) tracked-format rows for crosshair
+    dets that bypass the tracker (hsv_settings.bypass_tracker). track_id/idx/
+    start_frame/last_frame are placeholders (-1/0); downstream only reads the
+    xyxy box + cls."""
+    k = len(crosshair_rows)
+    out = np.empty((k, 10), dtype=np.float32)
+    out[:, 0:4] = crosshair_rows[:, 0:4]   # xyxy
+    out[:, 4] = -1                         # track_id (untracked)
+    out[:, 5] = crosshair_rows[:, 4]       # score
+    out[:, 6] = crosshair_rows[:, 5]       # cls
+    out[:, 7] = -1                         # idx
+    out[:, 8] = 0                          # start_frame
+    out[:, 9] = 0                          # last_frame
+    return out
+
+
 class _UltralyticsResults:
     """Minimal stand-in for the detection results object ultralytics ``update`` expects.
 

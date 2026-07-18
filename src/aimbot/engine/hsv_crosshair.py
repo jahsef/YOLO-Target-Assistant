@@ -114,36 +114,139 @@ class _MinPool2d(nn.Module):
         return -self.mp(-x)
 
 
-# Fused row-suppression kernel.
-# Replaces the multi-op cupy chain that was previously:
-#   mask_u8 = mask.astype(cp.uint8)                            # cast kernel
-#   row_sum = mask_u8.sum(axis=1, keepdims=True)               # reduction kernel
-#   col_sum = mask_u8.sum(axis=0, keepdims=True)               # reduction kernel
-#   suppress = row_sum > _HS_RATIO_THRESHOLD * col_sum         # broadcast compare kernel
-#   mask_filtered = mask & ~suppress                           # boolean AND kernel
-# 5 kernel launches + 5 intermediate allocations. Bench showed ~0.33 ms.
-# The two reductions can't be fused trivially (need full row/col sums before per-pixel apply),
-# but the broadcast-compare + AND CAN — that's what this kernel does. Reductions stay as
-# native cp.sum (CUB-backed, already optimal); kernel does the per-pixel decision in one pass.
-_ROW_SUPPRESS_KERNEL = cp.RawKernel(r"""
+
+# Single-block fused kernel: HSV red-mask + row/col sums + row-suppression in ONE
+# launch. Replaces mask kernel + 2 CUB reductions + suppress kernel (4 launches) for
+# the heuristic_spam hot path. Row/col sums are a global reduction over the mask, so
+# a true single launch needs a barrier between "compute mask + sums" and "apply
+# suppression"; with gridDim.x == 1 a block-wide __syncthreads() is that barrier and
+# no cooperative-launch support is required. One block grid-strides the whole ROI —
+# single-SM only, fine for the fixed small ROI (240x240); init asserts the size cap.
+# HSV math is identical to _RED_MASK_KERNEL; sums are over the PRE-suppression mask
+# and the (float) row_sum > ratio * col_sum compare is exact for counts < 2^24.
+_FUSED_MASK_SUPPRESS_KERNEL = cp.RawKernel(r"""
 extern "C" __global__
-void row_suppress_apply(const unsigned char* __restrict__ mask,
-                        const long long*    __restrict__ row_sum,
-                        const long long*    __restrict__ col_sum,
-                        unsigned char*      __restrict__ out,
-                        const int H,
-                        const int W,
-                        const float ratio) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = H * W;
-    if (idx >= total) return;
-    int y = idx / W;
-    int x = idx % W;
-    // suppress when row is more than ratio*col times wider than column is tall.
-    bool suppress = ((float)row_sum[y]) > ratio * ((float)col_sum[x]);
-    out[idx] = (mask[idx] && !suppress) ? 1 : 0;
+void fused_red_mask_row_suppress(const unsigned char* __restrict__ rgb,
+                                 unsigned char* __restrict__ mask,
+                                 const int H,
+                                 const int W,
+                                 const int src_pitch_px,
+                                 const int color_center,
+                                 const int color_range,
+                                 const int s_min,
+                                 const int v_min,
+                                 const int s_max,
+                                 const int v_max,
+                                 const float ratio) {
+    extern __shared__ int smem[];
+    int* row_sum = smem;       // H ints
+    int* col_sum = smem + H;   // W ints
+
+    const int n = H * W;
+
+    for (int i = threadIdx.x; i < H + W; i += blockDim.x) smem[i] = 0;
+    __syncthreads();
+
+    // phase A: per-pixel HSV mask + shared-memory sums of the pre-suppression mask.
+    // rgb may be a strided view of the full frame: row y starts at y * src_pitch_px px.
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        int y = i / W;
+        int x = i % W;
+        int base = (y * src_pitch_px + x) * 3;
+        unsigned char r = rgb[base + 0];
+        unsigned char g = rgb[base + 1];
+        unsigned char b = rgb[base + 2];
+
+        unsigned char mx = r > g ? r : g; if (b > mx) mx = b;
+        unsigned char mn = r < g ? r : g; if (b < mn) mn = b;
+
+        unsigned char m = 0;
+        int v = mx;
+        if (v >= v_min && v <= v_max) {
+            int diff = mx - mn;
+            int s = (mx == 0) ? 0 : (diff * 255) / mx;
+            if (s >= s_min && s <= s_max && diff != 0) {
+                // OpenCV hue scale: degrees / 2 -> [0, 180).
+                // 30 == 60/2 (factor that absorbs the /2 into the numerator).
+                int h;
+                if (mx == r)       h = (30 * (g - b)) / diff;
+                else if (mx == g)  h = 60 + (30 * (b - r)) / diff;
+                else               h = 120 + (30 * (r - g)) / diff;
+                if (h < 0) h += 180;
+
+                int d = h - color_center;
+                if (d < 0) d = -d;
+                if (d > 90) d = 180 - d;
+                m = (2 * d <= color_range) ? 1 : 0;
+            }
+        }
+        mask[i] = m;
+        if (m) {
+            atomicAdd(&row_sum[y], 1);
+            atomicAdd(&col_sum[x], 1);
+        }
+    }
+    __syncthreads();
+
+    // phase B: zero pixels whose row is more than ratio*col wider than the column is tall.
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        if (mask[i]) {
+            int y = i / W;
+            int x = i % W;
+            if ((float)row_sum[y] > ratio * (float)col_sum[x]) mask[i] = 0;
+        }
+    }
 }
-""", "row_suppress_apply")
+""", "fused_red_mask_row_suppress")
+
+_FUSED_BLOCK_THREADS = 1024
+
+
+def fused_red_mask_suppress(rgb_gpu: cp.ndarray, color_center: int, color_range: int,
+                            s_min: int, v_min: int, s_max: int = 255, v_max: int = 255,
+                            ratio: float = _HS_RATIO_THRESHOLD,
+                            out: cp.ndarray | None = None,
+                            validate_device: bool = True) -> cp.ndarray:
+    """rgb_gpu: (H, W, 3) cp.uint8 RGB. A basic row/col slice of a larger frame is
+    consumed in place via its row pitch (no copy); any other layout (e.g. a
+    negative-stride BGR->RGB flip) falls back to one ascontiguousarray copy.
+
+    Returns (H, W) cp.bool_: red mask with row-suppression applied, in ONE kernel
+    launch (see _FUSED_MASK_SUPPRESS_KERNEL). `out` is an optional pre-allocated
+    (H, W) uint8 buffer so hot paths never allocate. validate_device=False skips
+    the per-call shared-mem/block-size asserts for callers that checked at init.
+    """
+    assert rgb_gpu.dtype == cp.uint8 and rgb_gpu.ndim == 3 and rgb_gpu.shape[2] == 3
+    h, w = int(rgb_gpu.shape[0]), int(rgb_gpu.shape[1])
+    shared_bytes = (h + w) * 4
+    if validate_device:
+        attrs = cp.cuda.Device().attributes
+        assert shared_bytes <= attrs['MaxSharedMemoryPerBlock'], (
+            f"ROI {h}x{w} needs {shared_bytes} B shared mem, "
+            f"device block limit is {attrs['MaxSharedMemoryPerBlock']} B"
+        )
+        assert attrs['MaxThreadsPerBlock'] >= _FUSED_BLOCK_THREADS
+
+    s0, s1, s2 = rgb_gpu.strides
+    if s1 == 3 and s2 == 1 and s0 > 0 and s0 % 3 == 0:
+        src = rgb_gpu
+        pitch = s0 // 3
+    else:
+        src = cp.ascontiguousarray(rgb_gpu)
+        pitch = w
+    if out is None:
+        out = cp.empty((h, w), dtype=cp.uint8)
+
+    _FUSED_MASK_SUPPRESS_KERNEL(
+        (1,), (_FUSED_BLOCK_THREADS,),
+        (src, out, np.int32(h), np.int32(w), np.int32(pitch),
+         np.int32(color_center), np.int32(color_range),
+         np.int32(s_min), np.int32(v_min),
+         np.int32(s_max), np.int32(v_max),
+         np.float32(ratio)),
+        shared_mem=shared_bytes,
+    )
+    return out.view(cp.bool_)
 
 # croshair rgba(222, 40, 14) -> 8, 0.94, 0.87
 # names(1)    rgba(184, 75, 65) -> 5, 0.65, 0.72
@@ -168,15 +271,16 @@ class HSVCrosshairDetector:
       "connected":       largest connected red component centroid. most robust
                          (e.g. survives red enemy uniforms leaking into ROI), but
                          pays for cupyx.scipy.ndimage.label which is the slowest path.
-      "heuristic_spam":  row-suppression (fused kernel) + morphological opening +
-                         density downsample (2x stride-2 avgpools) + weighted_center
-                         on the density output (coarse). small FPs (nametags, tracers,
-                         random red gear) get smoothed into near-zero density by
-                         downsampling, while the reticle's concentrated mass dominates.
-                         bench_fine_vs_coarse_fp.py shows ~40% lower centroid error vs
-                         running weighted_center directly on the opened mask in FP-heavy
-                         scenes. uses its own buffers at density resolution — distinct
-                         from "weighted_center" scheme's full-resolution buffers.
+      "heuristic_spam":  fused single-launch mask + row-suppression kernel +
+                         morphological opening + density downsample (2x stride-2
+                         avgpools) + weighted_center on the density output (coarse).
+                         small FPs (nametags, tracers, random red gear) get smoothed
+                         into near-zero density by downsampling, while the reticle's
+                         concentrated mass dominates. bench_fine_vs_coarse_fp.py shows
+                         ~40% lower centroid error vs running weighted_center directly
+                         on the opened mask in FP-heavy scenes. uses its own buffers at
+                         density resolution — distinct from "weighted_center" scheme's
+                         full-resolution buffers.
     """
 
     VOTING_SCHEMES = ("simple", "weighted_center", "connected", "heuristic_spam")
@@ -208,14 +312,17 @@ class HSVCrosshairDetector:
             self._y0 = 0
             self._x0 = 0
 
-        # Bind the chosen vote method directly so detect() doesn't dispatch on a string each frame.
-        vote_fn_map = {
-            "simple": self._vote_simple,
-            "weighted_center": self._vote_weighted_center,
-            "connected": self._vote_connected,
-            "heuristic_spam": self._vote_heuristic_spam,
+        # Bind the chosen scheme directly so detect() doesn't dispatch on a string each
+        # frame. Every _process_* takes the RGB ROI and returns (cy, cx) in ROI-local
+        # coords or None — heuristic_spam fuses masking into its own kernel, the other
+        # schemes wrap cupy_red_mask + their vote.
+        process_fn_map = {
+            "simple": self._process_simple,
+            "weighted_center": self._process_weighted_center,
+            "connected": self._process_connected,
+            "heuristic_spam": self._process_heuristic_spam,
         }
-        self._vote = vote_fn_map[voting_scheme]
+        self._process = process_fn_map[voting_scheme]
 
         # Scheme-specific buffer init. heuristic_spam runs weighted_center at the
         # density-output resolution (coarse), so it owns its own buffers separately.
@@ -272,6 +379,64 @@ class HSVCrosshairDetector:
         self._hs_ys, self._hs_xs, self._hs_weights, self._hs_wm = (
             self._make_wc_buffers(self._hs_dh, self._hs_dw)
         )
+        # fused single-block kernel: shared row/col sums must fit one block's smem,
+        # and the launch needs a full 1024-thread block. trivially true at 240x240
+        # (1920 B); the asserts catch a future full-frame ROI before it silently breaks.
+        dev_attrs = cp.cuda.Device().attributes
+        self._hs_shared_bytes = (self.roi_h + self.roi_w) * 4
+        assert self._hs_shared_bytes <= dev_attrs['MaxSharedMemoryPerBlock'], (
+            f"ROI {self.roi_h}x{self.roi_w} needs {self._hs_shared_bytes} B shared mem, "
+            f"device block limit is {dev_attrs['MaxSharedMemoryPerBlock']} B"
+        )
+        assert dev_attrs['MaxThreadsPerBlock'] >= _FUSED_BLOCK_THREADS
+        # pre-allocated mask output; fully consumed (astype f32) within the same frame.
+        self._hs_mask_buf = cp.empty((self.roi_h, self.roi_w), dtype=cp.uint8)
+
+    # --- per-scheme processing (RGB ROI in, ROI-local (cy, cx) or None out) ----
+
+    @staticmethod
+    def _red_mask(roi: cp.ndarray) -> cp.ndarray:
+        return cupy_red_mask(roi, color_center=_HSV_COLOR_CENTER, color_range=_HSV_COLOR_RANGE,
+                             s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
+                             v_min=_HSV_V_MIN, v_max=_HSV_V_MAX)
+
+    def _process_simple(self, roi: cp.ndarray):
+        return self._vote_simple(self._red_mask(roi))
+
+    def _process_weighted_center(self, roi: cp.ndarray):
+        return self._vote_weighted_center(self._red_mask(roi))
+
+    def _process_connected(self, roi: cp.ndarray):
+        return self._vote_connected(self._red_mask(roi))
+
+    def _process_heuristic_spam(self, roi: cp.ndarray):
+        """fused mask + row-suppress (1 launch) -> opening -> density -> weighted_center
+        on density (coarse). Density downsampling smooths small FPs into near-zero
+        contribution. Coordinates come back in density-grid space; multiply by the
+        stride to map to ROI pixels."""
+        mask_filtered = self._fused_mask_suppress(roi)
+        mask_f32 = mask_filtered.astype(cp.float32)
+        mask_t = torch.from_dlpack(mask_f32)[None, None, ...]
+        with torch.no_grad():
+            opened = self._opening(mask_t)
+            pooled = self._density(opened)
+        pooled_cp = cp.from_dlpack(pooled.detach())[0, 0]
+        pt = self._weighted_center_inner(
+            pooled_cp, self._hs_ys, self._hs_xs, self._hs_weights, self._hs_wm
+        )
+        if pt is None:
+            return None
+        cy_d, cx_d = pt
+        return cy_d * self._hs_stride_y, cx_d * self._hs_stride_x
+
+    def _fused_mask_suppress(self, roi: cp.ndarray) -> cp.ndarray:
+        """One-launch fused HSV red-mask + row-suppression into the pre-allocated
+        buffer. Device limits were asserted once at init, so skip per-call checks."""
+        return fused_red_mask_suppress(
+            roi, _HSV_COLOR_CENTER, _HSV_COLOR_RANGE,
+            s_min=_HSV_S_MIN, v_min=_HSV_V_MIN, s_max=_HSV_S_MAX, v_max=_HSV_V_MAX,
+            ratio=_HS_RATIO_THRESHOLD, out=self._hs_mask_buf, validate_device=False,
+        )
 
     # --- voting ---------------------------------------------------------------
 
@@ -311,44 +476,6 @@ class HSVCrosshairDetector:
             return None
         return float(ys.mean()), float(xs.mean())
 
-    def _row_suppress(self, mask: cp.ndarray) -> cp.ndarray:
-        """Fused row-suppression: returns mask AND NOT (row_sum[y] > ratio * col_sum[x]).
-        Reductions stay native (CUB-backed); the broadcast-compare + AND fuses into
-        one custom kernel — see _ROW_SUPPRESS_KERNEL for rationale."""
-        H, W = mask.shape
-        mask_u8 = mask.view(cp.uint8)  # bool and uint8 share memory layout
-        row_sum = mask_u8.sum(axis=1, dtype=cp.int64)  # (H,)
-        col_sum = mask_u8.sum(axis=0, dtype=cp.int64)  # (W,)
-        out = cp.empty_like(mask_u8)
-        n = H * W
-        threads = 256
-        blocks = (n + threads - 1) // threads
-        _ROW_SUPPRESS_KERNEL(
-            (blocks,), (threads,),
-            (mask_u8, row_sum, col_sum, out,
-             np.int32(H), np.int32(W), np.float32(_HS_RATIO_THRESHOLD)),
-        )
-        return out.view(cp.bool_)
-
-    def _vote_heuristic_spam(self, mask: cp.ndarray):
-        """row-suppress -> opening -> density -> weighted_center on density (coarse).
-        Density downsampling smooths small FPs into near-zero contribution. Coordinates
-        come back in density-grid space; multiply by the stride to map to ROI pixels."""
-        mask_filtered = self._row_suppress(mask)
-        mask_f32 = mask_filtered.astype(cp.float32)
-        mask_t = torch.from_dlpack(mask_f32)[None, None, ...]
-        with torch.no_grad():
-            opened = self._opening(mask_t)
-            pooled = self._density(opened)
-        pooled_cp = cp.from_dlpack(pooled.detach())[0, 0]
-        pt = self._weighted_center_inner(
-            pooled_cp, self._hs_ys, self._hs_xs, self._hs_weights, self._hs_wm
-        )
-        if pt is None:
-            return None
-        cy_d, cx_d = pt
-        return cy_d * self._hs_stride_y, cx_d * self._hs_stride_x
-
     # --- public entry point ---------------------------------------------------
 
     def detect(self, rgb_frame_gpu: cp.ndarray) -> np.ndarray:
@@ -364,9 +491,7 @@ class HSVCrosshairDetector:
         else:
             roi = rgb_frame_gpu
 
-        mask = cupy_red_mask(roi, color_center= _HSV_COLOR_CENTER, color_range= _HSV_COLOR_RANGE, s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
-                             v_min=_HSV_V_MIN, v_max=_HSV_V_MAX)
-        vote = self._vote(mask)
+        vote = self._process(roi)
         if vote is None:
             return np.empty((0, 6), dtype=np.float32)
 

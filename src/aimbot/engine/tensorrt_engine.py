@@ -4,7 +4,7 @@ import numpy as np
 import cupy as cp
 import torch
 
-from torchvision.ops import batched_nms
+from .yolo_decode import decode_raw, nms_pack
 
 
 class TensorRT_Engine:
@@ -91,26 +91,11 @@ class TensorRT_Engine:
         Output: (M, 6) cupy array, columns [x1, y1, x2, y2, conf, cls]; M <= max_det.
         """
         # zero-copy bridge cupy -> torch (same GPU memory)
-        out_t = torch.from_dlpack(self.output_buffer)[0]  # (4+nc, anchors)
-        pred = out_t.transpose(0, 1)  # (anchors, 4+nc)
-        boxes_xywh = pred[:, :4]
-        cls_scores = pred[:, 4:]
-        scores, classes = cls_scores.max(dim=-1)
-
-        mask = scores > self.conf_threshold
-        boxes_xywh, scores, classes = boxes_xywh[mask], scores[mask], classes[mask]
-        if boxes_xywh.numel() == 0:
+        out_t = torch.from_dlpack(self.output_buffer)
+        boxes_xyxy, scores, classes, _ = decode_raw(out_t, self.conf_threshold)
+        if boxes_xyxy.numel() == 0:
             return cp.empty((0, 6), dtype=cp.float32)
-
-        cx, cy, w, h = boxes_xywh.unbind(-1)
-        boxes_xyxy = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
-
-        keep = batched_nms(boxes_xyxy, scores, classes, self.iou_threshold)[: self.max_det]
-        out = torch.cat([
-            boxes_xyxy[keep],
-            scores[keep, None],
-            classes[keep, None].to(boxes_xyxy.dtype),
-        ], dim=-1)
+        out = nms_pack(boxes_xyxy, scores, classes, self.iou_threshold, self.max_det)
         return cp.from_dlpack(out)
 
     def _parse_cp_results(self):

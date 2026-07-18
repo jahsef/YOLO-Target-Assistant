@@ -2,7 +2,6 @@ import win32api
 import win32con
 import random
 import math
-import logging
 from ..utils.utils import log
 
 class MouseMover:
@@ -19,12 +18,6 @@ class MouseMover:
         self.overshoot_strength = overshoot_strength
         self.overshoot_chance = overshoot_chance
     
-    def move_mouse_raw(self,dx:int,dy:int):
-        """
-        moves mouse with raw deltas no scaling        
-        """
-        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, dx = int(dx), dy = int(dy))
-    
     def move_mouse_humanized(self,dx:float,dy:float) -> tuple[int, int]:
         """
         takes raw deltas, scales and humanizes them and moves mouse, returns scaled deltas too
@@ -35,18 +28,7 @@ class MouseMover:
         log(f'moving mouse: {round_x,round_y}', "DEBUG")
         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, round_x, round_y)
         return (round_x ,round_y)
-        
-    # Apply confidence scaling (0.0 to 1.0)
-    # smoothed_dx = dx * conf  # Higher conf = stronger aim
-    # smoothed_dy = dy * conf
 
-    # # Inverse confidence jitter (low conf = more wobble)
-    # jitter_scale = (1.0 - conf) * max_jitter
-    # smoothed_dx += random.uniform(-jitter_scale, jitter_scale)
-    # smoothed_dy += random.uniform(-jitter_scale, jitter_scale)
-    
-    
-    
     def _humanize_movement(self,dx:float, dy:float) -> tuple[float,float]:
         
         jitter = self.jitter_strength * (abs(dx) + abs(dy))
@@ -69,7 +51,10 @@ class MouseMover:
         x = abs(delta) / self.max_deltas  # Normalized delta (0 to 1)
         
         # How much to blend toward scaling (tune for desired curve)
-        blend = 1 - math.exp(-x * 2.5)  # 3.0 = curve steepness (higher = sharper transition)
+        blend = 1 - math.exp(-x * 8)  # curve steepness (coeff on x). higher = steeper.
+	# steep curve (ie 8) has near 1.0 sens when deltas are small (desired, do not want fine tune deltas to be thrown away)
+	# high steepness results in lower sens on the high end of deltas (prevents wild flicking, pseudo accel decel patterns)
+	# https://www.desmos.com/calculator/7ehwmgth7v
         
         # Apply sensitivity (higher sensitivity = more scaling, but not inverted)
         

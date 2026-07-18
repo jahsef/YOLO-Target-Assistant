@@ -12,12 +12,10 @@ cross-patch NMS over the flattened, source-coord-translated boxes.
 """
 
 import cupy as cp
-import numpy as np
-import tensorrt as trt
 import torch
-from torchvision.ops import batched_nms
 
 from .tensorrt_engine import TensorRT_Engine
+from .yolo_decode import decode_baked, decode_raw, nms_pack
 from ..utils.utils import log
 
 
@@ -93,64 +91,24 @@ class SRBundleEngine:
     def _patchified_nms(self):
         """Cross-patch class-aware NMS, returning (1, num_dets, 6) in source-image global coords.
 
-        Two YOLO output formats supported:
+        Two YOLO output formats supported (see yolo_decode):
           - raw   (NMS not baked): (B, 4+nc, anchors), boxes xywh in SR-local px
           - baked (NMS baked):     (B, max_det, 6),    boxes xyxy in SR-local px (zero-padded)
 
-        Both paths produce (boxes_xyxy_local, scores, classes, batch_idx), then translate
+        Both decode to flat (boxes_xyxy_local, scores, classes, batch_idx), translate
         to source coords by dividing by sr_scale and adding the patch origin, then
         run a single cross-patch NMS.
         """
         out_t = torch.from_dlpack(self.yolo.output_buffer)
-
-        if not self.yolo.baked_nms:
-            # raw: (B, 4+nc, A) xywh
-            B, _, A = out_t.shape
-            pred = out_t.transpose(1, 2)  # (B, A, 4+nc)
-            boxes_xywh = pred[..., :4].reshape(-1, 4)
-            scores, classes = pred[..., 4:].max(dim=-1)
-            scores_flat = scores.reshape(-1)
-            classes_flat = classes.reshape(-1)
-            batch_idx = torch.arange(B, device=out_t.device).repeat_interleave(A)
-
-            mask = scores_flat > self.yolo.conf_threshold
-            boxes_xywh = boxes_xywh[mask]
-            scores_flat = scores_flat[mask]
-            classes_flat = classes_flat[mask]
-            batch_idx = batch_idx[mask]
-
-            if boxes_xywh.numel() == 0:
-                return cp.empty((1, 0, 6), dtype=cp.float32)
-
-            cx, cy, w, h = boxes_xywh.unbind(-1)
-            boxes_xyxy_local = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
-        else:
-            # baked NMS: (B, max_det, 6) xyxy + conf + cls, zero-padded rows when conf=0
-            B, M, _ = out_t.shape
-            boxes_xyxy_local = out_t[..., :4].reshape(-1, 4)
-            scores_flat = out_t[..., 4].reshape(-1)
-            classes_flat = out_t[..., 5].reshape(-1).long()
-            batch_idx = torch.arange(B, device=out_t.device).repeat_interleave(M)
-
-            mask = scores_flat > self.yolo.conf_threshold
-            boxes_xyxy_local = boxes_xyxy_local[mask]
-            scores_flat = scores_flat[mask]
-            classes_flat = classes_flat[mask]
-            batch_idx = batch_idx[mask]
-
-            if boxes_xyxy_local.numel() == 0:
-                return cp.empty((1, 0, 6), dtype=cp.float32)
+        decode = decode_baked if self.yolo.baked_nms else decode_raw
+        boxes_local, scores, classes, batch_idx = decode(out_t, self.yolo.conf_threshold)
+        if boxes_local.numel() == 0:
+            return cp.empty((1, 0, 6), dtype=cp.float32)
 
         origins_t = torch.from_dlpack(self.patch_origins)  # (B, 2) (x, y)
         off_xyxy = origins_t[batch_idx].repeat(1, 2)  # (N, 4)
-        boxes_global = boxes_xyxy_local / self.sr_scale + off_xyxy
+        boxes_global = boxes_local / self.sr_scale + off_xyxy
 
         # idxs = classes only -> cross-patch suppression IS desired (boxes spanning seams)
-        keep = batched_nms(boxes_global, scores_flat, classes_flat, self.yolo.iou_threshold)[: self.yolo.max_det]
-
-        out = torch.cat([
-            boxes_global[keep],
-            scores_flat[keep, None],
-            classes_flat[keep, None].to(boxes_global.dtype),
-        ], dim=-1).unsqueeze(0)  # (1, num_dets, 6)
-        return cp.from_dlpack(out)
+        out = nms_pack(boxes_global, scores, classes, self.yolo.iou_threshold, self.yolo.max_det)
+        return cp.from_dlpack(out.unsqueeze(0))  # (1, num_dets, 6)

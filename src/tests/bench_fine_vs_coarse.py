@@ -1,6 +1,6 @@
 """Benchmark fine vs coarse weighted_center.
 
-Both run identical front-end: cupy_red_mask -> row-suppress -> opening.
+Both run identical front-end: fused mask+row-suppress kernel (1 launch) -> opening.
 Fine:   weighted_center on 320x320 opened mask
 Coarse: weighted_center on 80x80 density output (2x stride-2 avgpools, 4x total downsample)
 """
@@ -15,7 +15,7 @@ import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.aimbot.engine.hsv_crosshair import cupy_red_mask, _ROW_SUPPRESS_KERNEL
+from src.aimbot.engine.hsv_crosshair import fused_red_mask_suppress
 
 # --- shared front-end -------------------------------------------------------
 
@@ -71,32 +71,18 @@ _fine_ys,   _fine_xs,   _fine_weights,   _fine_wm   = make_wc_buffers(_H, _W)
 _coarse_h, _coarse_w = _H // _DOWNSAMPLE, _W // _DOWNSAMPLE
 _coarse_ys, _coarse_xs, _coarse_weights, _coarse_wm = make_wc_buffers(_coarse_h, _coarse_w)
 
-
-def row_suppress(mask: cp.ndarray) -> cp.ndarray:
-    H, W = mask.shape
-    mask_u8 = mask.view(cp.uint8)
-    row_sum = mask_u8.sum(axis=1, dtype=cp.int64)
-    col_sum = mask_u8.sum(axis=0, dtype=cp.int64)
-    out = cp.empty_like(mask_u8)
-    n = H * W
-    threads = 256
-    blocks = (n + threads - 1) // threads
-    _ROW_SUPPRESS_KERNEL(
-        (blocks,), (threads,),
-        (mask_u8, row_sum, col_sum, out, np.int32(H), np.int32(W), np.float32(_RATIO)),
-    )
-    return out.view(cp.bool_)
+_mask_buf = cp.empty((_H, _W), dtype=cp.uint8)  # reused fused-kernel output
 
 
 def front_end(frame_rgb_gpu: cp.ndarray):
-    """Run shared mask -> row-suppress -> opening. Returns (opened_cp, pooled_cp)."""
-    cp_mask = cupy_red_mask(
-        frame_rgb_gpu[cp.newaxis, ...],
+    """Run shared fused mask+row-suppress -> opening. Returns (opened_cp, pooled_cp)."""
+    mask_filtered = fused_red_mask_suppress(
+        frame_rgb_gpu,
         color_center=_HSV_COLOR_CENTER, color_range=_HSV_COLOR_RANGE,
         s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
         v_min=_HSV_V_MIN, v_max=_HSV_V_MAX,
-    )[0, ...]
-    mask_filtered = row_suppress(cp_mask)
+        ratio=_RATIO, out=_mask_buf,
+    )
     mask_f32 = mask_filtered.astype(cp.float32)
     mask_t = torch.from_dlpack(mask_f32)[None, None, ...]
     with torch.no_grad():

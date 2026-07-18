@@ -1,6 +1,5 @@
 import time
 from collections import deque
-import sys
 
 class FPSTracker:
     def __init__(self, update_interval=1):
@@ -23,7 +22,13 @@ class FPSTracker:
             self.last_update = current_time
     
     def get_fps(self):
-        time_elapsed = self.buffer[0] - self.buffer[-1]#index for peek
-        return self.fps_buffer_len / time_elapsed
+        # N timestamps span N-1 frame intervals; 0.0 while warming up so callers
+        # (e.g. lead prediction) degrade to no-op instead of crashing/over-reporting.
+        if len(self.buffer) < 2:
+            return 0.0
+        time_elapsed = self.buffer[0] - self.buffer[-1]
+        if time_elapsed <= 0:
+            return 0.0
+        return (len(self.buffer) - 1) / time_elapsed
             
 

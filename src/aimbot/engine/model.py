@@ -2,8 +2,6 @@ from pathlib import Path
 from . import tensorrt_engine
 import cupy as cp
 import torch
-from ultralytics.engine.results import Boxes
-from ultralytics.engine.results import Results
 import numpy as np
 
 _PREPROCESS_KERNEL_CP = cp.RawKernel(r"""
@@ -24,54 +22,25 @@ void hwc_u8_to_nchw_f32_div255(const unsigned char* __restrict__ src,
 """, "hwc_u8_to_nchw_f32_div255")
 
 class Model:
-    def __init__(self,model_path:Path,hw_capture:tuple[int,int]):
+    def __init__(self,model_path:Path,hw_capture:tuple[int,int],conf_threshold:float = 0.25):
         """_summary_
 
         Args:
             model_path (Path): path to your model lol
             hw_capture (tuple[int,int]): THIS IS ONLY USED FOR NON ENGINE MODELS, ENGINE MODELS DETERMINE IMGSZ AUTOMATICALLY BASED ON EXPORT SETTINGS
-        
+            conf_threshold (float): confidence threshold applied by either backend
+
         Returns:
-            model object 
+            model object
         """
         self.model = None
+        self.conf_threshold = conf_threshold
         self._load_model(model_path=model_path,hw_capture=hw_capture)
-        self.empty_boxes = Boxes(boxes=torch.empty((0, 6)), orig_shape=self.hw_capture)
-    
-    def _parse_results_into_ultralytics_boxes(self,results: object) -> Boxes:
-        """_summary_
 
-        Args:
-            results (object): results from model inference (cp,np etc.)
-
-        Returns:
-            Boxes: results in Ultralytics Boxes format, used for Ultralytics BYTETracker
-        """
-
-        #need to convert into boxes to pass into the ultralytics BYTETracker
-        #xyxy, conf, cls, smth else?
-
-        if type(results) is list:
-            # print('the correct thing runs now')
-            return results[0].boxes
-
-        if len(results) == 0:
-            return self.empty_boxes
-
-        if type(results) is not torch.Tensor:
-            results = torch.as_tensor(results)
-
-
-        converted_boxes = Boxes(
-            boxes=results,
-            orig_shape=self.hw_capture
-        )
-        return converted_boxes
-    
     def _load_model(self, model_path: Path, hw_capture:tuple[int,int]):
         self.model_ext = model_path.suffix
         if self.model_ext == '.engine':
-            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, conf_threshold= .25,verbose = False)
+            self.model = tensorrt_engine.TensorRT_Engine(engine_file_path= model_path, conf_threshold= self.conf_threshold,verbose = False)
             self.hw_capture = self.model.imgsz
             if self.model == None:
                 raise Exception("tensorrt engine did not load correctly")
@@ -97,20 +66,12 @@ class Model:
             #Torch/CuPy/.... array of results (n,[x1,y1,x2,y2,conf,cls_id]) where n is bounding box index
             results = cp.asnumpy(self.model.inference_cp(self._preprocess_cp(src)))
         elif self.model_ext == '.pt':
-            results =  self._inference_torch(self._preprocess_torch(src)).cpu().numpy()
+            # ultralytics returns list[Results]; .boxes.data is (n, 6) [x1,y1,x2,y2,conf,cls]
+            results = self._inference_torch(self._preprocess_torch(src))[0].boxes.data.cpu().numpy()
         else:
             raise Exception('big no no happened this should never execute, model was probably not loaded correctly')
         return results
-        # return self._parse_results_into_ultralytics_boxes(results)
 
-
-    # def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:
-    #     frame = frame.transpose(2, 0, 1)[cp.newaxis, ...]
-    #     frame = cp.ascontiguousarray(frame, dtype=cp.float32)
-    #     cp.true_divide(frame, 255.0, out=frame, dtype=cp.float32)
-    #     return frame
-    
-    # above is old non fused operations, about 3x slower (0.05ms lol)
     def _preprocess_cp(self, frame: cp.ndarray) -> cp.ndarray:
         """frame: (H, W, 3) cp.uint8. Returns (1, 3, H, W) cp.float32."""
         assert frame.dtype == cp.uint8 and frame.ndim == 3 and frame.shape[2] == 3
@@ -129,11 +90,11 @@ class Model:
 
     
     @torch.inference_mode()
-    def _inference_torch(self,source:torch.Tensor) -> Boxes:
+    def _inference_torch(self,source:torch.Tensor) -> list:
         results = self.model(source=source,
-            conf = .25,
+            conf = self.conf_threshold,
             imgsz=self.hw_capture,
-            verbose = True
+            verbose = False
         )
 
         return results
@@ -153,5 +114,5 @@ if __name__ == '__main__':
     frame_cp = cp.asarray(np.random.randint(0, 255, (H, W, 3), dtype=np.uint8))
 
     result = model.inference(frame_cp)
-    print(f"output shape: {result.data.shape}")
-    print(f"output: {result.data}")
+    print(f"output shape: {result.shape}")
+    print(f"output: {result}")

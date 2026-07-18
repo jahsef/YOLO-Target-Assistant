@@ -3,12 +3,15 @@ from pathlib import Path
 import cupy as cp
 import numpy as np
 import torch
-from torchvision.ops import batched_nms
 
 from . import model
 from .sr_bundle_engine import SRBundleEngine
 from .hsv_crosshair import HSVCrosshairDetector
+from .yolo_decode import nms_pack
 from ..utils.utils import log
+
+# shared no-detections sentinel; callers only read it, never mutate
+_EMPTY_DETS = np.empty((0, 6), dtype=np.float32)
 
 
 class DetectionPipeline:
@@ -27,9 +30,11 @@ class DetectionPipeline:
       - ADS + locked LARGE target  -> base only (target is already easy; skip SR cost).
       - else (no ADS / no lock / hysteresis expired) -> base [+ scan_sr] union'd then NMS'd.
 
-    `run(frame, ads, locked, locked_lifetime)` returns (M, 6) np.float32
-    [x1,y1,x2,y2,conf,cls] in base-region xyxy coords. Caller is responsible for
-    xyxy->xywh and feeding to the tracker.
+    `run(frame, ads, locked, locked_lifetime)` returns
+    (dets_for_tracker, bypass_crosshair_rows), both (N, 6) np.float32
+    [x1,y1,x2,y2,conf,cls] in base-region xyxy coords. Caller converts the first
+    array xyxy->xywh for the tracker; bypass rows stay xyxy and are injected
+    post-tracker (see hsv_settings.bypass_tracker).
     """
 
     def __init__(self, cfg: dict):
@@ -44,7 +49,7 @@ class DetectionPipeline:
         pt_hw_capture = tuple(m['pt_hw_capture'])
         conf_threshold = m['conf_threshold']
 
-        self.base_model = model.Model(base_path, hw_capture=pt_hw_capture)
+        self.base_model = model.Model(base_path, hw_capture=pt_hw_capture, conf_threshold=conf_threshold)
         self.base_hw_capture = self.base_model.hw_capture
 
         # SR bundles
@@ -67,6 +72,9 @@ class DetectionPipeline:
         # HSV crosshair detector (separate from main detection but lives here so the
         # pipeline owns all per-frame frame-consumers).
         self.hsv_detector = self._build_hsv_detector(cfg)
+        # hsv rows can skip the tracker entirely (no track latency on the reticle);
+        # the split happens in _apply_crosshair_routing so the loop never re-derives it.
+        self.hsv_bypass_tracker = cfg['targeting_settings']['hsv_settings']['bypass_tracker']
 
     # --- init helpers ---------------------------------------------------------
 
@@ -97,11 +105,11 @@ class DetectionPipeline:
             frame_hw=self.base_hw_capture,
             center_crop_hw=tuple(crop) if crop else None,
         )
-
+    
     # --- main entry point -----------------------------------------------------
 
     def run(self, frame: cp.ndarray, ads: bool, locked: np.ndarray | None,
-            locked_lifetime: int) -> np.ndarray:
+            locked_lifetime: int) -> tuple[np.ndarray, np.ndarray]:
         """
         frame: (H, W, 3) uint8 RGB cupy.
         ads: is RMB held this frame.
@@ -110,6 +118,8 @@ class DetectionPipeline:
         locked_lifetime: 0 if `locked` was refreshed this frame, N if N frames stale.
                          the precision_sr hysteresis path consults this to decide whether
                          to keep cropping at the cached location.
+
+        Returns (dets_for_tracker, bypass_crosshair_rows) — see class docstring.
         """
         # SR bundles need cupy/TRT. fall back to wrapper API for .pt base.
         if self.base_model.model_ext != ".engine":
@@ -154,9 +164,12 @@ class DetectionPipeline:
 
     # --- crosshair routing ----------------------------------------------------
 
-    def _apply_crosshair_routing(self, model_dets: np.ndarray, frame_rgb_gpu: cp.ndarray) -> np.ndarray:
-        """Filter model crosshair-class dets per cfg, then append HSV-derived crosshair row if enabled.
+    def _apply_crosshair_routing(self, model_dets: np.ndarray, frame_rgb_gpu: cp.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Filter model crosshair-class dets per cfg, run the HSV detector if enabled,
+        and split its row out when it should bypass the tracker.
         model_dets: (M, 6) np.float32 [x1, y1, x2, y2, conf, cls] in base-region coords.
+        Returns (dets_for_tracker, bypass_crosshair_rows). Model-predicted crosshair
+        rows always go through the tracker; only HSV rows can bypass.
         """
         ts = self.cfg['targeting_settings']
         crosshair_cls_id = ts['crosshair_cls_id']
@@ -164,12 +177,16 @@ class DetectionPipeline:
         if not ts['model_predict_crosshair']:
             model_dets = model_dets[model_dets[:, 5] != crosshair_cls_id]
 
+        bypass_rows = _EMPTY_DETS
         if self.hsv_detector is not None:
             hsv_row = self.hsv_detector.detect(frame_rgb_gpu)
             if hsv_row.shape[0]:
-                model_dets = np.concatenate([model_dets, hsv_row], axis=0)
+                if self.hsv_bypass_tracker:
+                    bypass_rows = hsv_row
+                else:
+                    model_dets = np.concatenate([model_dets, hsv_row], axis=0)
 
-        return model_dets
+        return model_dets, bypass_rows
 
     # --- helpers --------------------------------------------------------------
 
@@ -180,11 +197,9 @@ class DetectionPipeline:
         if dets.shape[0] == 0:
             return dets
         t = torch.from_dlpack(dets)
-        boxes = t[:, :4]
-        scores = t[:, 4]
-        classes = t[:, 5].long()
-        keep = batched_nms(boxes, scores, classes, self.union_nms_iou)
-        return cp.from_dlpack(t[keep])
+        # uncapped on purpose: union of per-model outputs is already small
+        out = nms_pack(t[:, :4], t[:, 4], t[:, 5].long(), self.union_nms_iou)
+        return cp.from_dlpack(out)
 
     def _run_precision_crop(self, preprocessed: cp.ndarray, locked: np.ndarray) -> cp.ndarray:
         """Crop centered on the locked target, run through precision_sr,
@@ -203,9 +218,3 @@ class DetectionPipeline:
             out[:, 1] += y0
             out[:, 3] += y0
         return out
-
-    def cleanup(self):
-        del self.base_model
-        del self.scan_sr
-        del self.precision_sr
-        del self.hsv_detector

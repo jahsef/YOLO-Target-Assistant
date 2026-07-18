@@ -1,6 +1,6 @@
 """Visual prototype for the simplified `heuristic_spam` voting scheme.
 
-Pipeline: cupy_red_mask -> row-suppression (fused kernel) -> opening -> density ->
+Pipeline: fused mask+row-suppression kernel (1 launch) -> opening -> density ->
 weighted_center on density output (coarse). Coarse beats fine on FP suppression
 (see bench_fine_vs_coarse_fp.py).
 """
@@ -17,7 +17,7 @@ import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.aimbot.engine.hsv_crosshair import cupy_red_mask, _ROW_SUPPRESS_KERNEL
+from src.aimbot.engine.hsv_crosshair import fused_red_mask_suppress
 from src.aimbot.utils.utils import log
 
 # root stays at INFO to suppress betterercam DEBUG spam; only our 'aimbot' logger goes to DEBUG.
@@ -97,25 +97,7 @@ wc_weights = cp.exp(
       + ((_xs - _cx0) ** 2) / (2.0 * _sigma_x * _sigma_x))
 ).astype(cp.float32)
 wc_wm = cp.empty((_dh, _dw), dtype=cp.float32)
-
-
-def row_suppress(mask: cp.ndarray, ratio: float) -> cp.ndarray:
-    """Fused row-suppression via _ROW_SUPPRESS_KERNEL (shared with hsv_crosshair.py)."""
-    H, W = mask.shape
-    mask_u8 = mask.view(cp.uint8)
-    row_sum = mask_u8.sum(axis=1, dtype=cp.int64)
-    col_sum = mask_u8.sum(axis=0, dtype=cp.int64)
-    out = cp.empty_like(mask_u8)
-    n = H * W
-    threads = 256
-    blocks = (n + threads - 1) // threads
-    _ROW_SUPPRESS_KERNEL(
-        (blocks,), (threads,),
-        (mask_u8, row_sum, col_sum, out,
-         np.int32(H), np.int32(W), np.float32(ratio)),
-    )
-    return out.view(cp.bool_)
-
+_mask_buf = cp.empty((_H, _W), dtype=cp.uint8)  # reused fused-kernel output
 
 LOG_EVERY = 144
 frame_idx = -1
@@ -128,17 +110,17 @@ while True:
         continue
 
     frame_rgb_gpu = frame[..., ::-1]
-    frame_rgb_gpu_bhwc = frame_rgb_gpu[cp.newaxis, ...]
-    cp_mask = cupy_red_mask(
-        frame_rgb_gpu_bhwc,
+
+    # 1) fused mask + row-suppression, one launch. the negative-stride BGR->RGB
+    #    view falls back to an internal contiguous copy inside the helper.
+    cp_mask_filtered = fused_red_mask_suppress(
+        frame_rgb_gpu,
         color_center=_HSV_COLOR_CENTER,
         color_range=_HSV_COLOR_RANGE,
         s_min=_HSV_S_MIN, s_max=_HSV_S_MAX,
         v_min=_HSV_V_MIN, v_max=_HSV_V_MAX,
-    )[0, ...]  # (H, W) bool
-
-    # 1) row-suppress (fused kernel) on raw mask
-    cp_mask_filtered = row_suppress(cp_mask, RATIO_THRESHOLD)
+        ratio=RATIO_THRESHOLD, out=_mask_buf,
+    )  # (H, W) bool
 
     # 2) opening (erosion -> dilation) -> density (avgpool x2) on torch
     mask_f32 = cp_mask_filtered.astype(cp.float32)
@@ -160,7 +142,7 @@ while True:
         final_pt = None
 
     # ---- viz ---------------------------------------------------------------
-    cp_mask_np = cp.asnumpy(cp_mask)[..., None]
+    cp_mask_np = cp.asnumpy(cp_mask_filtered)[..., None]
     frame_np = cp.asnumpy(frame)
     opened_u8 = (opened[0, 0].detach().cpu().numpy() * 255).astype(np.uint8)
     opened_vis_bgr = cv2.cvtColor(opened_u8, cv2.COLOR_GRAY2BGR)
@@ -190,7 +172,7 @@ while True:
 
     panel_labels = [
         ("OG image", 0),
-        ("cupy fused kernel", w),
+        ("fused mask+suppress", w),
         ("opened (erode->dilate)", 2 * w),
         (f"density {_dh}x{_dw}", 3 * w),
         ("weighted_center result", 4 * w),
