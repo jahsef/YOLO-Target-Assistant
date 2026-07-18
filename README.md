@@ -23,15 +23,15 @@ TensorRT fp16 engine also gives a 2-3x speedup over PyTorch runtime.
 
 # Preprocessing
 
-CuPy fused kernel achieves a 23x speedup over Ultralytics on preprocessing. CuPy (nonfused) optimizations allows us a 10x speedup over Ultralytics. Within Ultralytics ecosystem, we can achieve 4x speedup for single frame inputs \[PR](https://github.com/ultralytics/ultralytics/pull/23743).
+CuPy fused kernel achieves a 23x speedup over Ultralytics on preprocessing. CuPy (nonfused) optimizations allows us a 10x speedup over Ultralytics. Within Ultralytics ecosystem, we can achieve 4x speedup for single frame inputs (https://github.com/ultralytics/ultralytics/pull/23743).
 
 # Screenshotting
 
-The fastest Windows screenshotting lib previously was bettercam \[Bettercam](https://github.com/RootKit-Org/BetterCam), but it did not support CuPy natively. Forked it to support CuPy for a \~20% speedup over base library (\[BettererCam] https://github.com/jahsef/BettererCam).
+The fastest Windows screenshotting lib previously was bettercam (https://github.com/RootKit-Org/BetterCam), but it did not support CuPy natively. Forked it to support CuPy for a \~20% speedup over base library (https://github.com/jahsef/BettererCam).
 
 # Tracker
 
-Ultralytics BYTETracker is quite slow, eating up 1 ms when inference can be as fast as 5 ms. Found existing tracker implementations, but found them to be unsatisfactory. Vendored and vectorized Ultralytics version for 5x speedups on dense scenes. Wrote a C++ version leveraging eigen for 60x speedups on sparse scenarios, and 25x speedups on high density \[c\_bytetracker](https://github.com/jahsef/c\_bytetracker). Forked lib also has QOL features unique to it while maintaining API parity.
+Ultralytics BYTETracker is quite slow, eating up 1 ms when inference can be as fast as 5 ms. Found existing tracker implementations, but found them to be unsatisfactory. Vendored and vectorized Ultralytics version for 5x speedups on dense scenes. Wrote a C++ version leveraging eigen for 60x speedups on sparse scenarios, and 25x speedups on high density (https://github.com/jahsef/c\_bytetracker). Forked lib also has QOL features unique to it while maintaining API parity.
 
 # Small object detection
 
