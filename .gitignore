@@ -20,3 +20,6 @@ __pycache__/
 .vscode/
 
 dampening_factors.csv
+
+# test console output (transient; tests/results/*.md and *.json are the committed record)
+tests/results/console.txt

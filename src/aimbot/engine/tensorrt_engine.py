@@ -25,7 +25,7 @@ class TensorRT_Engine:
         self.engine = self._load_engine(engine_file_path, engine_bytes)
         self.context = self.engine.create_execution_context()
 
-        #now explicitly defines input instead of assuming first idx is input tensor
+        #find io tensors by mode, dont assume idx 0 is the input
         self.input_tensor_name = None
         self.output_tensor_name = None
         for i in range(self.engine.num_io_tensors):

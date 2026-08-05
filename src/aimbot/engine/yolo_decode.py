@@ -1,10 +1,7 @@
 """Shared YOLO output decoding + NMS packing.
 
-Three call sites previously each carried a copy of this logic:
-TensorRT_Engine._external_nms_cp (single-image raw output),
-SRBundleEngine._patchified_nms (batched raw OR baked output), and
-DetectionPipeline._union_nms (already-decoded rows). Pure torch — cupy<->torch
-dlpack bridging stays at the call sites.
+Pure torch — cupy<->torch dlpack bridging stays at the call sites, which is what lets
+the single-image, patchified and cross-model NMS paths share one implementation.
 
 Output format conventions:
   raw:   (B, 4+nc, A) xywh anchor predictions from a YOLO head without NMS baked in.

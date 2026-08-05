@@ -125,7 +125,7 @@ class TargetSelector:
         Retained across frames where no fresh enemy is picked — pair with
         _prev_detection_lifetime to know how stale it is.
       - _prev_detection_lifetime: 0 = updated this frame, N = N frames since the
-        last fresh pick. Used by the precision_sr hysteresis path so the pipeline
+        last fresh pick. Used by the sr hysteresis path so the pipeline
         can keep cropping at the cached location for a configurable grace window.
       - target_lru: OrderedDict of recently-seen track_ids; used for "stick to oldest
         target" behavior with 50% hysteresis (see _get_highest_priority_target).
@@ -145,7 +145,7 @@ class TargetSelector:
         #for lead (momentum based leading)
         self.MOVEMENT_BUFFER_LENGTH = 64
         self.WMA_VELOCITY_THRESHOLD = 72 #soft gating, starts thresholding @ 0.5 of this threshold. the hard gate is the num u put here
-        self.BASE_LEAD_SENS = 0.24
+        self.BASE_LEAD_SENS = 0.32
         self.LEAD_AGE_WARMUP_FRAMES = 12 # linear warmup: 0 lead at age 0, full lead at this age
         self.TARGET_SWITCH_DECAY = 0.3 #keep 30% of old momentum when switching targets
         self.LEAD_X_SCALE = 1.0
@@ -159,13 +159,14 @@ class TargetSelector:
         self.GRAVITY = 128  # Roblox default studs/s^2
         self.TARGET_REAL_HEIGHT = 5
         self.TARGET_REAL_WIDTH = 3.5
-        self.DISTANCE_CALIBRATION_FACTOR = 0.35
+        self.DISTANCE_CALIBRATION_FACTOR = 0.40
         self.MIN_DISTANCE = 1.0  # studs; floor so degenerate boxes can't NaN the drop math
         
         
 
         self.cfg = cfg
-        self.detection_window_center = (detection_window_dim[0]//2 , detection_window_dim[1]//2)
+        # detection_window_dim is (h, w); this is consumed as an (x, y) point
+        self.detection_window_center = (detection_window_dim[1]//2 , detection_window_dim[0]//2)
         self.screen_height = screen_hw[0]
         self.screen_width = screen_hw[1]
         self.base_zoom = 1.0#i have this here so in case we want to change base zoom for whatever reason
@@ -196,7 +197,7 @@ class TargetSelector:
         self.last_target_id = None #for target-aware momentum decay
         # last selected enemy detection row (10-col tracker output), or None.
         # exposed for external precision-crop logic in aimbot main loop. retained
-        # across empty-pick frames so precision_sr hysteresis can crop at the
+        # across empty-pick frames so sr hysteresis can crop at the
         # last known location; pair with _prev_detection_lifetime.
         self._prev_detection = None
         self._prev_detection_lifetime = 0  # 0 = updated this frame; N = N frames stale
@@ -214,35 +215,37 @@ class TargetSelector:
 
         # Expected ratio is TARGET_REAL_HEIGHT / TARGET_REAL_WIDTH (~1.43 for 5/3.5).
         # Lower observed ratio means the target appears "too wide" (vertically occluded).
-        height_penalty = 1.0
+        # 1.0 = fully trusted, ->0 = box is squat so its height is probably cut off.
+        height_trust = 1.0
         if target_height_pixels and target_width_pixels:
             expected_ratio = self.TARGET_REAL_HEIGHT / self.TARGET_REAL_WIDTH
             ratio_factor = (target_height_pixels / target_width_pixels) / expected_ratio
             ratio_factor = max(0.3, min(1.0, ratio_factor))  # below 0.3 is extreme occlusion
-            height_penalty = ratio_factor ** 2  # squared: more aggressive for occluded targets
+            height_trust = ratio_factor ** 2  # squared: more aggressive for occluded targets
 
+        # Inverse-variance blend. For a size-based estimate d = S/theta, the relative
+        # error is just (pixel localisation noise / apparent size in pixels), so the
+        # weight goes as pixels**2 — a small, far target is the unreliable one. Same
+        # pixel noise on both axes, so it cancels out of the ratio.
         distances = []
-        variances = []
+        weights = []
         if target_height_pixels:
             px_per_rad = self.screen_height / eff_vert_fov
             angular_size = target_height_pixels / px_per_rad
             distances.append(self.TARGET_REAL_HEIGHT / (2 * math.tan(angular_size / 2)))
-            # weight by inverse square of angular size (smaller = less reliable);
-            # occlusion penalty lowers the height estimate's trust further
-            variances.append(angular_size ** 2 * height_penalty)
+            weights.append(target_height_pixels ** 2 * height_trust)
 
         if target_width_pixels:
             px_per_rad = self.screen_width / eff_horiz_fov
             angular_size = target_width_pixels / px_per_rad
             distances.append(self.TARGET_REAL_WIDTH / (2 * math.tan(angular_size / 2)))
-            variances.append(angular_size ** 2)
+            weights.append(target_width_pixels ** 2)
 
         if not distances:
             # degenerate 0x0 box: nothing measurable. distance 0 would NaN the
             # drop math downstream (real_drop / distance) — return the floor instead.
             return self.MIN_DISTANCE
 
-        weights = [1 / v for v in variances] if len(variances) == 2 else [1]
         weighted_distance = sum(d * w for d, w in zip(distances, weights)) / sum(weights)
 
         return max(self.MIN_DISTANCE, weighted_distance * self.DISTANCE_CALIBRATION_FACTOR)
@@ -392,7 +395,7 @@ class TargetSelector:
               - target is lost OR another, larger target becomes top priority on screen,
               - get_deltas didn't run / wasn't reached for the new target,
               - _prev_detection is still the old small one,
-              - precision_sr keeps cropping a stale 80x80 region forever, base never gets a turn,
+              - the sr path keeps cropping a stale 80x80 region forever, base never gets a turn,
                 so we never re-detect the larger target globally to escape the state.
             Pulling from the freshest tracker frame here guarantees the next branch decision
             reflects what's actually on screen right now, not what we last aimed at.

@@ -54,7 +54,7 @@ def get_screen_dims(cfg: dict) -> tuple[int, int]:
 
 def create_camera(screen_xy: tuple[int, int], base_hw_capture: tuple[int, int]):
     """betterercam capture of a fixed region centered on screen at base_hw_capture size.
-    base_model + scan_sr both consume the full frame; precision_sr consumes a sub-slice.
+    base_model consumes the full frame; the sr model consumes a sub-slice.
     Note: ultralytics .pt inference assumes BGR input; engines here are trained on RGB."""
     screen_x, screen_y = screen_xy
     base_x_offset = (screen_x - base_hw_capture[1]) // 2
@@ -72,15 +72,31 @@ def create_camera(screen_xy: tuple[int, int], base_hw_capture: tuple[int, int]):
 
 
 def create_mousemover(cfg: dict) -> mousemover.MouseMover:
+    """Threaded variant if input_settings.separate_mouse_thread, else the direct one.
+    Started here so callers get something already running; Aimbot.cleanup stops it."""
     sens_cfg = cfg['sensitivity_settings']
-    return mousemover.MouseMover(
+    args = (
         sens_cfg['overall_sens'],
         sens_cfg['sens_scaling'],
         sens_cfg['max_deltas'],
         sens_cfg['jitter_strength'],
         sens_cfg['overshoot_strength'],
-        sens_cfg['overshoot_chance']
+        sens_cfg['overshoot_chance'],
     )
+    input_cfg = cfg['input_settings']
+    if not input_cfg.get('separate_mouse_thread', False):
+        return mousemover.MouseMover(*args)
+
+    mt = input_cfg['mouse_thread_config']
+    mover = mousemover.ThreadedMouseMover(
+        *args,
+        poll_hz=mt['poll_hz'],
+        drain_alpha=mt['drain_alpha'],
+        min_step_px=mt['min_step_px'],
+        output_alpha=mt['output_alpha'],
+    )
+    mover.start()
+    return mover
 
 
 def create_inputdetector(cfg: dict) -> inputdetector.InputDetector:

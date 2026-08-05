@@ -1,4 +1,6 @@
 """
+DEPRECATED — unused, kept as scaffolding for when scan_sr returns.
+
 SR + YOLO bundle engine. Square non-overlapping patchify only, single image in.
 
 Flow:

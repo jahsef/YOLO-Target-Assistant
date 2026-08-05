@@ -9,6 +9,7 @@ from ..utils.utils import log
 class DPGOverlay:
     def __init__(self,height:int,width:int,only_render_overlay_non_ads:bool, overlay_render_cls_id:int):
         self.padding = 16
+        self.thickness = 3
         self.draw_offset = self.padding//2
         self.vp_width = width
         self.vp_height = height
@@ -24,9 +25,12 @@ class DPGOverlay:
         self.only_render_overlay_non_ads = only_render_overlay_non_ads
         
         self._start()
+        self.outsets = [8, 0.2, 8, 0.2] # min pixel x, % size x, min pixel y, % size y
+	# increases bb size to not occlude target. 
 
         #we use this so if not updated within time we manually update to avoid window freeze
         self.last_updated_time = time.time()
+        
 
     def _setup_viewport(self):
         screen_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
@@ -71,35 +75,35 @@ class DPGOverlay:
         draw_width = dpg.get_item_width(self.drawlist_tag)
         draw_height = dpg.get_item_height(self.drawlist_tag)
         corner_length = 12
-        thickness = 2
-
+        
+		
         # Top-left corner
-        dpg.draw_line((0, 0), (corner_length, 0), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
-        dpg.draw_line((0, 0), (0, corner_length), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
+        dpg.draw_line((0, 0), (corner_length, 0), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
+        dpg.draw_line((0, 0), (0, corner_length), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
 
         # Top-right corner
-        dpg.draw_line((draw_width - corner_length - offset, 0), (draw_width - offset, 0), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
-        dpg.draw_line((draw_width - offset, 0), (draw_width - offset, corner_length), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
+        dpg.draw_line((draw_width - corner_length - offset, 0), (draw_width - offset, 0), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
+        dpg.draw_line((draw_width - offset, 0), (draw_width - offset, corner_length), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
 
         # Bottom-left corner
-        dpg.draw_line((0, draw_height - offset), (corner_length, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
-        dpg.draw_line((0, draw_height - corner_length - offset), (0, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
+        dpg.draw_line((0, draw_height - offset), (corner_length, draw_height - offset), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
+        dpg.draw_line((0, draw_height - corner_length - offset), (0, draw_height - offset), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
 
         # Bottom-right corner
-        dpg.draw_line((draw_width - corner_length - offset, draw_height - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
-        dpg.draw_line((draw_width - offset, draw_height - corner_length - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=thickness, parent=self.drawlist_tag)
+        dpg.draw_line((draw_width - corner_length - offset, draw_height - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
+        dpg.draw_line((draw_width - offset, draw_height - corner_length - offset), (draw_width - offset, draw_height - offset), color=(255, 0, 0, 255), thickness=self.thickness, parent=self.drawlist_tag)
 
     def _draw_bb_corners(self, x1: int, y1: int, x2: int, y2: int):
         x1 = x1 - self.draw_offset
         y1 = y1 - self.draw_offset
         x2 = x2 - self.draw_offset
         y2 = y2 - self.draw_offset
-
+	
         bb_w = x2 - x1
         bb_h = y2 - y1
 
-        outset_x = max(2, int(bb_w * 0.2))
-        outset_y = max(2, int(bb_h * 0.2))
+        outset_x = max(self.outsets[0], int(bb_w * self.outsets[1]))
+        outset_y = max(self.outsets[2], int(bb_h * self.outsets[3]))
         x1 -= outset_x
         y1 -= outset_y
         x2 += outset_x
@@ -107,21 +111,20 @@ class DPGOverlay:
 
         corner_lx = max(2, int(bb_w * 0.15))
         corner_ly = max(2, int(bb_h * 0.15))
-        thickness = 2
         color = (0, 205, 0, 255)
 
         # Top-left
-        self.bbox_tags.append(dpg.draw_line((x1, y1), (x1 + corner_lx, y1), color=color, thickness=thickness, parent=self.drawlist_tag))
-        self.bbox_tags.append(dpg.draw_line((x1, y1), (x1, y1 + corner_ly), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x1, y1), (x1 + corner_lx, y1), color=color, thickness=self.thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x1, y1), (x1, y1 + corner_ly), color=color, thickness=self.thickness, parent=self.drawlist_tag))
         # Top-right
-        self.bbox_tags.append(dpg.draw_line((x2 - corner_lx, y1), (x2, y1), color=color, thickness=thickness, parent=self.drawlist_tag))
-        self.bbox_tags.append(dpg.draw_line((x2, y1), (x2, y1 + corner_ly), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x2 - corner_lx, y1), (x2, y1), color=color, thickness=self.thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x2, y1), (x2, y1 + corner_ly), color=color, thickness=self.thickness, parent=self.drawlist_tag))
         # Bottom-left
-        self.bbox_tags.append(dpg.draw_line((x1, y2), (x1 + corner_lx, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
-        self.bbox_tags.append(dpg.draw_line((x1, y2 - corner_ly), (x1, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x1, y2), (x1 + corner_lx, y2), color=color, thickness=self.thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x1, y2 - corner_ly), (x1, y2), color=color, thickness=self.thickness, parent=self.drawlist_tag))
         # Bottom-right
-        self.bbox_tags.append(dpg.draw_line((x2 - corner_lx, y2), (x2, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
-        self.bbox_tags.append(dpg.draw_line((x2, y2 - corner_ly), (x2, y2), color=color, thickness=thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x2 - corner_lx, y2), (x2, y2), color=color, thickness=self.thickness, parent=self.drawlist_tag))
+        self.bbox_tags.append(dpg.draw_line((x2, y2 - corner_ly), (x2, y2), color=color, thickness=self.thickness, parent=self.drawlist_tag))
         
     def _clear_canvas(self):
         for tag in self.bbox_tags:

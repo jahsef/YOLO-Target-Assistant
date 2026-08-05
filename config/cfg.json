@@ -1,41 +1,55 @@
 {
-    "IMPORTANT1": "base_model = always-on detector. scan_sr_bundle / precision_sr_bundle may be null/empty to disable.",
+    "IMPORTANT1": "base_model = always-on detector. sr_model may be empty to disable.",
     "IMPORTANT2": "pt_hw_capture only for pytorch models",
-    "IMPORTANT3": "scan_sr runs alongside base when not ADS (or ADS w/ no locked target). precision_sr replaces scan_sr when ADS w/ locked small target. final NMS is run on the union.",
+    "IMPORTANT3": "sr_model replaces base when ADS w/ locked small target, cropping around the lock. scan_sr is deprecated for now.",
     "logging": {
         "logging_level": "INFO",
         "print_fps": true
     },
-    "input_settings": {
+    "input_settings": { 	
         "toggle_hotkey": "",
         "IMPORTANT": "if toggle_hotkey is empty string, then it aimbot cannot be completely turned off",
-        "right_click_toggle": true
+        "right_click_toggle": true,
+        "_doc_separate_mouse_thread": "spread each frame of aim over many small mouse events instead of one jump",
+        "separate_mouse_thread": true,
+        "_doc_on_click_pull_down_px": "px pulled down per LMB press while ADS, for recoil. 0 = off. 800dpi 0.07 roblox sens -> 20-60px for most guns",
+        "on_click_pull_down_px": 16,
+        "mouse_thread_config": {
+            "_doc_poll_hz": "drain tick rate. real ceiling ~650Hz from sleep granularity",
+            "poll_hz": 1000,
+            "_doc_drain_alpha": "fraction of the pending buffer sent per tick. lower = softer start on big jumps",
+            "drain_alpha": 0.15,
+            "_doc_min_step_px": "min drain per tick, keeps backlog at zero. 1 = smoothest, 3 = snappiest",
+            "min_step_px": 1.0,
+            "_doc_output_alpha": "ema on the emitted step so speed ramps up instead of starting at full tilt. 0.5 = half the new movement per tick. 1 = off",
+            "output_alpha": 0.25
+        }
     },
     "other": {
-        "inactive_throttle_ms": 10
+        "inactive_throttle_ms": 10,
+        "_doc_async_pipeline": "3-stage threaded loop. gain scales with camera.grab() cost; ~+6% fps typical",
+        "async_pipeline": true
     },
     "display_settings": {
         "monitor_idx": 0
     },
     "model": {
-        "base_dir": "data/models/pf_1550img_11s/weights",
+        "base_dir": "data/models/pf_26s_sslround3/weights",
         "base_filename": "640x640_stripped.engine",
-        "_doc_ex_scan_sr_bundle": "data/models/bundled_models/b64_yolo11s_640x640_srbundle.pt",
-        "_doc_ex_precision_sr_bundle": "data/models/bundled_models/b1_yolo11s_80x80_srbundle.pt",
-        "scan_sr_bundle": "",
-        "precision_sr_bundle": "data/models/bundled_models/b1_yolo11s_80x80_srbundle.pt",
-        "_doc_bb_largest_side_threshold_override": "max(h,w) of locked target below which precision_sr fires; -1 = use bundle default baked into the .pt",
-        "bb_largest_side_threshold_override": 48,
-        "_doc_precision_sr_hysteresis_frames": "if precision_sr lock is missed for up to N frames, keep cropping at last known location instead of bailing to scan. 0 = disabled (legacy).",
-        "precision_sr_hysteresis_frames": 2,
+        "_doc_scan_sr_bundle": "deprecated, planned to return",
+        "scan_sr_bundle": "sr_model_b1_engine.pt",
+        "_doc_sr_model": "SRModel .pt from src.sr.export. crop size, scale and bb threshold come off the model ex: data/models/sr/sr_model_b1_engine.pt",
+        "sr_model": "",
+        "_doc_sr_hysteresis_frames": "if the sr lock is missed for up to N frames, keep cropping at last known location instead of bailing to scan. 0 = disabled.",
+        "sr_hysteresis_frames": 2,
         "pt_hw_capture": [320, 320],
-        "conf_threshold": 0.25,
+        "conf_threshold": 0.325,
         "union_nms_iou": 0.25
     },
     "sensitivity_settings": {
         "max_deltas": 256,
-        "overall_sens": 0.65,
-        "sens_scaling": 0.0,
+        "overall_sens": 0.50,
+        "sens_scaling": 0.05,
         "jitter_strength": 0.00,
         "overshoot_strength": 0.00,
         "overshoot_chance": 0.00
@@ -54,13 +68,13 @@
             "bypass_tracker": true
         },
         "predict_drop": true,
-        "lead_target": false,
-        "prioritize_oldest": false,
+        "lead_target": true,
+        "prioritize_oldest": true,
         "zoom": 1.2,
-        "projectile_velocity": 1350.0,
+        "projectile_velocity": 3200.0,
         "zoom_interpolation_frames": 69,
-        "base_head_offset": 0.12,
-        "min_frames_to_target": 2
+        "base_head_offset": 0.35,
+        "min_frames_to_target": 0
     },
     "tracker_settings": {
         "_doc_tracker_impl": "'ultralytics', 'ultralytics_vectorized', 'cpp'. non-ultralytics requires c_bytetracker from github.com/jahsef/c_bytetracker",
@@ -68,7 +82,7 @@
     },
     "gui_settings": {
         "opencv_render": false,
-        "dpg_overlay": false,
+        "dpg_overlay": true,
         "only_render_overlay_non_ads": true
     }
 }

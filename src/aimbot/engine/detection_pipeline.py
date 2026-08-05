@@ -3,32 +3,36 @@ from pathlib import Path
 import cupy as cp
 import numpy as np
 import torch
+from sr import SRModel
 
 from . import model
-from .sr_bundle_engine import SRBundleEngine
 from .hsv_crosshair import HSVCrosshairDetector
-from .yolo_decode import nms_pack
+from .yolo_decode import decode_baked, decode_raw, nms_pack
 from ..utils.utils import log
 
 # shared no-detections sentinel; callers only read it, never mutate
 _EMPTY_DETS = np.empty((0, 6), dtype=np.float32)
 
+# within-crop NMS, for SR engines without it baked in. TensorRT_Engine's defaults.
+SR_NMS_IOU = 0.7
+SR_MAX_DET = 300
+
 
 class DetectionPipeline:
     """
-    Owns the full per-frame detection stack: base detector, optional scan_sr +
-    precision_sr SR bundles, optional HSV red-crosshair detector, cross-model NMS,
-    and the precision-crop hysteresis state machine.
+    Owns the full per-frame detection stack: base detector, optional SR model on a crop
+    around the lock, optional HSV red-crosshair detector, and cross-model NMS.
 
     Routing (mutually exclusive, decided per call):
-      - ADS + locked SMALL target  -> precision_sr only on a small crop centered on the lock.
-                                      base is skipped: the precision crop ROI doesn't cover
-                                      anything else, and the locked target is what matters.
-      - ADS + lock missing this frame but inside hysteresis budget -> precision_sr at last
-                                      known location. lets us survive 1-2 frames of detector
-                                      flicker without flipping back to scan path.
+      - ADS + locked SMALL target  -> sr only, on a crop centered on the lock. base is
+                                      skipped: the crop doesn't cover anything else.
+      - ADS + lock missing this frame but inside hysteresis budget -> sr at last known
+                                      location. survives 1-2 frames of detector flicker
+                                      without flipping back to the scan path.
       - ADS + locked LARGE target  -> base only (target is already easy; skip SR cost).
       - else (no ADS / no lock / hysteresis expired) -> base [+ scan_sr] union'd then NMS'd.
+
+    scan_sr is deprecated for now — the branch and _union_nms are kept for its return.
 
     `run(frame, ads, locked, locked_lifetime)` returns
     (dets_for_tracker, bypass_crosshair_rows), both (N, 6) np.float32
@@ -47,27 +51,22 @@ class DetectionPipeline:
             raise FileNotFoundError(f"base model missing: {base_path}")
 
         pt_hw_capture = tuple(m['pt_hw_capture'])
-        conf_threshold = m['conf_threshold']
+        self.conf_threshold = m['conf_threshold']
 
-        self.base_model = model.Model(base_path, hw_capture=pt_hw_capture, conf_threshold=conf_threshold)
+        self.base_model = model.Model(base_path, hw_capture=pt_hw_capture, conf_threshold=self.conf_threshold)
         self.base_hw_capture = self.base_model.hw_capture
 
-        # SR bundles
-        bb_thresh_override = m['bb_largest_side_threshold_override']
-        self.scan_sr = self._load_sr_bundle(m['scan_sr_bundle'], conf_threshold, "scan_sr", bb_thresh_override)
-        self.precision_sr = self._load_sr_bundle(m['precision_sr_bundle'], conf_threshold, "precision_sr", bb_thresh_override)
+        self.scan_sr = None  # deprecated, planned to return
+        self.sr = self._load_sr_model(m['sr_model'])
 
-        if self.scan_sr is not None and self.scan_sr.source_size != int(self.base_hw_capture[0]):
-            log(
-                f"scan_sr source_size={self.scan_sr.source_size} mismatched with base capture {self.base_hw_capture}",
-                "WARNING",
-            )
+        if self.sr is not None and self.sr.crop_size > min(self.base_hw_capture):
+            log(f"sr crop_size={self.sr.crop_size} exceeds base capture {self.base_hw_capture}", "WARNING")
 
         self.union_nms_iou = float(m['union_nms_iou'])
-          
-        # precision_sr hysteresis: # of stale-lock frames we tolerate before bailing
-        # back to the scan path. 0 = no hysteresis (legacy behavior).
-        self.precision_sr_hysteresis_frames = int(m['precision_sr_hysteresis_frames'])
+
+        # sr hysteresis: # of stale-lock frames we tolerate before bailing back to the
+        # scan path. 0 = bail as soon as the lock goes stale.
+        self.sr_hysteresis_frames = int(m['sr_hysteresis_frames'])
 
         # HSV crosshair detector (separate from main detection but lives here so the
         # pipeline owns all per-frame frame-consumers).
@@ -78,20 +77,22 @@ class DetectionPipeline:
 
     # --- init helpers ---------------------------------------------------------
 
-    def _load_sr_bundle(self, cfg_path, conf_threshold, label, bb_largest_side_threshold_override):
+    def _load_sr_model(self, cfg_path) -> SRModel | None:
+        """The SR artifact from src.sr.export. It owns its own crop size, scale and
+        box-routing threshold, so nothing here re-specifies them."""
         if not cfg_path:
-            log(f"{label} bundle disabled (no path configured)", "INFO")
+            log("sr model disabled (no path configured)", "INFO")
             return None
-        bundle_path = Path.cwd() / cfg_path
-        if not bundle_path.exists():
-            log(f"{label} bundle missing at {bundle_path} — disabling", "WARNING")
+        sr_path = Path.cwd() / cfg_path
+        if not sr_path.exists():
+            log(f"sr model missing at {sr_path} — disabling", "WARNING")
             return None
-        log(f"loading {label} bundle from {bundle_path}", "INFO")
-        return SRBundleEngine(
-            str(bundle_path),
-            conf_threshold=conf_threshold,
-            bb_largest_side_threshold_override=bb_largest_side_threshold_override,
-        )
+        sr = SRModel.load(sr_path)
+        if sr.kind != "engine":
+            log(f"sr model at {sr_path} is {sr.kind!r}, needs 'engine' — disabling", "WARNING")
+            return None
+        log(f"loaded sr model: {sr.describe()}", "INFO")
+        return sr
 
     def _build_hsv_detector(self, cfg) -> HSVCrosshairDetector | None:
         ts = cfg['targeting_settings']
@@ -105,7 +106,7 @@ class DetectionPipeline:
             frame_hw=self.base_hw_capture,
             center_crop_hw=tuple(crop) if crop else None,
         )
-    
+
     # --- main entry point -----------------------------------------------------
 
     def run(self, frame: cp.ndarray, ads: bool, locked: np.ndarray | None,
@@ -116,12 +117,12 @@ class DetectionPipeline:
         locked: latest top-priority enemy row (10-col tracker output) or None.
                 may be stale (not refreshed this frame) — locked_lifetime tells you how stale.
         locked_lifetime: 0 if `locked` was refreshed this frame, N if N frames stale.
-                         the precision_sr hysteresis path consults this to decide whether
+                         the sr hysteresis path consults this to decide whether
                          to keep cropping at the cached location.
 
         Returns (dets_for_tracker, bypass_crosshair_rows) — see class docstring.
         """
-        # SR bundles need cupy/TRT. fall back to wrapper API for .pt base.
+        # SR needs cupy/TRT. fall back to wrapper API for .pt base.
         if self.base_model.model_ext != ".engine":
             model_dets = self.base_model.inference(src=frame)
         else:
@@ -137,26 +138,23 @@ class DetectionPipeline:
 
         if ads and locked is not None:
             bb_max_side = max(float(locked[2] - locked[0]), float(locked[3] - locked[1]))
-            small_lock = (
-                self.precision_sr is not None
-                and bb_max_side < self.precision_sr.bb_largest_side_threshold
-            )
-            if small_lock and locked_lifetime <= self.precision_sr_hysteresis_frames:
+            small_lock = self.sr is not None and bb_max_side < self.sr.bb_side
+            if small_lock and locked_lifetime <= self.sr_hysteresis_frames:
                 # fresh small lock OR stale-but-within-budget. crop at the cached location.
-                tag = "fresh" if locked_lifetime == 0 else f"hysteresis {locked_lifetime}/{self.precision_sr_hysteresis_frames}"
-                log(f"precision sr ({tag})", level="DEBUG")
-                return self._run_precision_crop(preprocessed, locked)
+                tag = "fresh" if locked_lifetime == 0 else f"hysteresis {locked_lifetime}/{self.sr_hysteresis_frames}"
+                log(f"sr ({tag})", level="DEBUG")
+                return self._run_sr_crop(preprocessed, locked)
             if locked_lifetime == 0:
-                # fresh large lock (or precision_sr disabled). target's already easy; skip SR.
+                # fresh large lock (or sr disabled). target's already easy; skip SR.
                 log("base only", level="DEBUG")
                 return self.base_model.model.inference_cp(preprocessed)
-            # large stale lock or precision hysteresis expired -> fall through to scan path.
+            # large stale lock or sr hysteresis expired -> fall through to scan path.
 
         # default: base [+ scan_sr] union NMS. both arms NMS internally; this catches
         # between-model dups. cheap.
         log("base + scan_sr", level="DEBUG")
         base_res = self.base_model.model.inference_cp(preprocessed)
-        if self.scan_sr is not None:
+        if self.scan_sr is not None:  # deprecated, planned to return
             sr_res = self.scan_sr.inference_cp(preprocessed)[0]  # strip batch dim
             if sr_res.shape[0]:
                 base_res = self._union_nms(cp.concatenate([base_res, sr_res], axis=0))
@@ -201,20 +199,39 @@ class DetectionPipeline:
         out = nms_pack(t[:, :4], t[:, 4], t[:, 5].long(), self.union_nms_iou)
         return cp.from_dlpack(out)
 
-    def _run_precision_crop(self, preprocessed: cp.ndarray, locked: np.ndarray) -> cp.ndarray:
-        """Crop centered on the locked target, run through precision_sr,
-        translate detections back to base-region coords. Returns cupy (M, 6)."""
-        p = self.precision_sr.source_size
+    def _run_sr_crop(self, preprocessed: cp.ndarray, locked: np.ndarray) -> cp.ndarray:
+        """Crop centered on the locked target, run it through the SR model, translate
+        detections back to base-region coords. Returns cupy (M, 6)."""
+        c = self.sr.crop_size
         H, W = int(preprocessed.shape[2]), int(preprocessed.shape[3])
         cx = float((locked[0] + locked[2]) * 0.5)
         cy = float((locked[1] + locked[3]) * 0.5)
-        x0 = int(max(0, min(W - p, round(cx - p / 2))))
-        y0 = int(max(0, min(H - p, round(cy - p / 2))))
-        crop = cp.ascontiguousarray(preprocessed[:, :, y0:y0 + p, x0:x0 + p])
-        out = self.precision_sr.inference_cp(crop)[0]  # cupy (M, 6) in local crop coords
-        if out.shape[0]:
-            out[:, 0] += x0
-            out[:, 2] += x0
-            out[:, 1] += y0
-            out[:, 3] += y0
-        return out
+        x0 = int(max(0, min(W - c, round(cx - c / 2))))
+        y0 = int(max(0, min(H - c, round(cy - c / 2))))
+        crop = cp.ascontiguousarray(preprocessed[:, :, y0:y0 + c, x0:x0 + c])
+        return self._decode_sr(self.sr(torch.from_dlpack(crop)), x0, y0)  # SRModel takes torch
+
+    def _decode_sr(self, out, x0: int, y0: int) -> cp.ndarray:
+        """SR engine output -> cupy (M, 6) in base-region coords.
+
+        The model upscales internally, so its boxes come back in crop_size * sr_scale
+        px and have to be divided down before the crop origin means anything.
+        """
+        t = out if isinstance(out, torch.Tensor) else torch.from_dlpack(out)
+        if t.ndim != 3:
+            raise ValueError(f"sr model returned {tuple(t.shape)}; expected raw engine "
+                             f"output (B, max_det, 6) or (B, 4+nc, anchors)")
+        baked = t.shape[2] == 6  # (B, max_det, 6) vs raw (B, 4+nc, anchors)
+        decode = decode_baked if baked else decode_raw
+        # .float() before the offset: an fp16 engine resolves 0.5px at a 560px origin
+        boxes, scores, classes, _ = decode(t.float(), self.conf_threshold)
+        if boxes.numel() == 0:
+            return cp.empty((0, 6), dtype=cp.float32)
+
+        boxes = boxes / self.sr.sr_scale
+        boxes[:, 0::2] += x0
+        boxes[:, 1::2] += y0
+        if baked:
+            return cp.from_dlpack(torch.cat(
+                [boxes, scores[:, None], classes[:, None].to(boxes.dtype)], dim=-1))
+        return cp.from_dlpack(nms_pack(boxes, scores, classes, SR_NMS_IOU, SR_MAX_DET))
