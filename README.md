@@ -31,7 +31,7 @@ The fastest Windows screenshotting lib previously was bettercam (https://github.
 
 # Tracker
 
-Ultralytics BYTETracker is quite slow, eating up 1 ms when inference can be as fast as 5 ms. Found existing tracker implementations, but found them to be unsatisfactory. Vendored and vectorized Ultralytics version for 5x speedups on dense scenes. Wrote a C++ version leveraging eigen for 60x speedups on sparse scenarios, and 25x speedups on high density (https://github.com/jahsef/c\_bytetracker). Forked lib also has QOL features unique to it while maintaining API parity.
+Ultralytics BYTETracker is quite slow, eating up 1 ms when inference can be as fast as 5 ms. Found existing tracker implementations, but found them to be unsatisfactory. Vendored and vectorized Ultralytics version for 5x speedups on dense scenes. Wrote a C++ version leveraging eigen for 60x speedups on sparse scenarios, and 25x speedups on high density (https://github.com/jahsef/c_bytetracker). Forked lib also has QOL features unique to it while maintaining API parity.
 
 # Small object detection
 
