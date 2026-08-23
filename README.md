@@ -41,6 +41,8 @@ With many object detection models struggling with small objects, I sought a way 
 * **scan SR**: while scanning, the capture region is patchified and batch those frames for super resolution and re-detect with a 'scan SR' model, then union with base under a shared NMS, recovering small objects the base model misses.
 * **precision SR**: once a small target is locked, we crop a tight window around it, super resolve just that crop, and detect with a model trained on super resolution crops, for maximum detail where it actually matters.
 
+*SR = Super resolution*
+
 Routing is mutually exclusive per frame: scanning runs base / base + scan SR. A locked small target switches to precision SR on its crop, sufficiently large targets deferred to base model only. A temporal hysteresis budget keeps the precision crop at the last known location for a few frames to survive flickery detections. Note that scan SR compute (typically 16 - 64 patches from the capture region) is tractable because of TensorRT optimizations and because of high fps tracking only being needed for when a target is locked onto, not when scanning for targets.
 
 # HSV object detection
