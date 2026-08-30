@@ -23,7 +23,7 @@ TensorRT fp16 engine also gives a 2-3x speedup over PyTorch runtime.
 
 # Preprocessing
 
-CuPy fused kernel achieves a 23x speedup over Ultralytics on preprocessing. CuPy (nonfused) optimizations allows us a 10x speedup over Ultralytics. Within Ultralytics ecosystem, we can achieve 4x speedup for single frame inputs (https://github.com/ultralytics/ultralytics/pull/23743).
+CuPy fused kernel achieves a 23x speedup over Ultralytics on preprocessing. CuPy (nonfused) optimizations allows us a 10x speedup over Ultralytics. Within Ultralytics ecosystem, we can achieve 4x speedup for single frame inputs (https://github.com/ultralytics/ultralytics/pull/23743), (https://github.com/ultralytics/ultralytics/pull/25982), (https://github.com/ultralytics/ultralytics/pull/25989).
 
 # Screenshotting
 
